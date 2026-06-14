@@ -67,5 +67,5 @@ Zmapovat morfologicko-geografický jev: obce v ČR s koncovkou `-ice` a zjistit,
 ---
 
 Chceš, abych teď:
-- a) připojil souřadnice z RÚIAN (automaticky), nebo
-- b) spustil plný IJP parser nad všemi `-ice` obcemi a uložil výstup?
+- (a) připojil souřadnice z RÚIAN (automaticky), nebo
+- (b) spustil plný IJP parser nad všemi `-ice` obcemi a uložil výstup?
