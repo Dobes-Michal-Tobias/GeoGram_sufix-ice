@@ -43,7 +43,6 @@ __pypackages__/
 *.egg-info/
 
 # Notebook and workspace outputs
-notebooks/data/
 outputs/
 
 # Local env files
