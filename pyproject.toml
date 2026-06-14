@@ -1,0 +1,24 @@
+[project]
+name = "geogram"
+version = "0.1.0"
+description = "GeoGram: Czech municipality grammar and spatial analysis for names ending in -ice"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas",
+    "requests",
+    "beautifulsoup4",
+    "lxml",
+    "jupyter",
+    "notebook",
+    "ipykernel",
+    "geopandas",
+    "ufal.udpipe",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/yourname/GeoGram_sufix-ice"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
