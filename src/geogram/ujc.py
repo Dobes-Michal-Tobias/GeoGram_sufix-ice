@@ -11,6 +11,7 @@ SINGULAR = "singular"
 PLURAL = "plural"
 BOTH = "both"
 UNKNOWN = "unknown"
+NOT_FOUND = "not_found"
 
 
 def build_ujc_url(term: str) -> str:
@@ -37,12 +38,22 @@ def _normalize_cell_text(text: str) -> str:
     return normalized.strip()
 
 
+def _has_entry_table(html: str) -> bool:
+    """Return True if the page contains a declension table (server returned real content)."""
+    soup = BeautifulSoup(html, "html.parser")
+    return soup.find("table", {"class": "para"}) is not None
+
+
 def parse_number_from_ujc(html: str) -> str:
-    """Parse singular/plural information from the IJP ÚJČ entry HTML."""
-    soup = BeautifulSoup(html, "lxml-xml")
+    """Parse singular/plural information from the IJP ÚJČ entry HTML.
+
+    Returns NOT_FOUND when the page has no declension table at all (either
+    the term is missing from IJP or the server returned a rate-limited response).
+    """
+    soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table", {"class": "para"})
     if table is None:
-        return UNKNOWN
+        return NOT_FOUND
 
     rows = table.find_all("tr")
     if len(rows) < 2:
@@ -51,7 +62,7 @@ def parse_number_from_ujc(html: str) -> str:
     header_cells = [cell.get_text(strip=True).lower() for cell in rows[0].find_all(["th", "td"])]
     try:
         singular_index = next(i for i, cell in enumerate(header_cells) if "jednotn" in cell)
-        plural_index = next(i for i, cell in enumerate(header_cells) if "množn" in cell or "mno�n" in cell)
+        plural_index = next(i for i, cell in enumerate(header_cells) if "mn" in cell and "slo" in cell)
     except StopIteration:
         singular_index = 1
         plural_index = 2
