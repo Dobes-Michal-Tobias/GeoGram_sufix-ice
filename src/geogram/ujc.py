@@ -1,6 +1,7 @@
 """Utilities for querying IJP ÚJČ and parsing Czech morphological number data."""
 
 import re
+import time
 from urllib.parse import quote_plus
 
 import requests
@@ -13,6 +14,12 @@ BOTH = "both"
 UNKNOWN = "unknown"
 NOT_FOUND = "not_found"
 
+_OVERLOAD_SIGNALS = [
+    "je ještě vyhodnocován",   # "another request from your IP is still being processed"
+    "server je přetížen",
+    "is still evalu",          # English fallback on the same page
+]
+
 
 def build_ujc_url(term: str) -> str:
     """Build the IJP ÚJČ search URL for a given term."""
@@ -20,15 +27,30 @@ def build_ujc_url(term: str) -> str:
     return f"https://prirucka.ujc.cas.cz/?slovo={encoded_term}"
 
 
-def fetch_ujc_entry(term: str) -> str:
-    """Fetch the IJP ÚJČ page HTML for a given term."""
+def _is_overloaded(html: str) -> bool:
+    """Return True when the server returned its 'please wait, server busy' page."""
+    return any(signal in html for signal in _OVERLOAD_SIGNALS)
+
+
+def fetch_ujc_entry(term: str, retries: int = 4, base_wait: float = 5.0) -> str:
+    """Fetch the IJP ÚJČ page HTML for a given term.
+
+    Retries automatically when the server returns its overload/queue page,
+    with exponentially increasing wait between attempts.
+    """
     url = build_ujc_url(term)
     headers = {
         "User-Agent": "GeoGram/1.0 (+https://github.com/yourname/GeoGram_sufix-ice)"
     }
-    response = requests.get(url, headers=headers, timeout=15)
-    response.raise_for_status()
-    return response.text
+    for attempt in range(retries + 1):
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        html = response.text
+        if not _is_overloaded(html):
+            return html
+        wait = base_wait * (2 ** attempt)
+        time.sleep(wait)
+    return html  # return last response even if still overloaded
 
 
 def _normalize_cell_text(text: str) -> str:
