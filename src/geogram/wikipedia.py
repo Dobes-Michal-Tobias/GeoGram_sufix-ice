@@ -117,37 +117,77 @@ def resolve_municipality(
 # Grammar number extraction
 # ---------------------------------------------------------------------------
 
+# Hard adjectives whose -é form is unambiguously inanimate-plural when preceding
+# an -ice name (feminine plural).  Soft adjectives like horní/dolní are invariant
+# across sg/pl and therefore excluded.
+_ADJ_PLURAL_ICE = re.compile(
+    r"^(velk[eé]|nov[eé]|star[eé]|česk[eé]|mal[eé]|b[ií]l[eé]|čern[eé]|"
+    r"červen[eé]|zelen[eé]|svat[eé]|zlaté|modr[eé])\s",
+    re.IGNORECASE,
+)
+
+
+def name_implies_plural(name: str) -> bool:
+    """Return True if the municipality name itself implies plural grammatical number.
+
+    Specifically: a hard adjective in its inanimate-plural -é form preceding
+    an -ice name unambiguously signals plural (e.g. "Velké Popovice").
+    Soft adjectives (horní, dolní, …) are invariant across sg/pl and excluded.
+    """
+    return bool(_ADJ_PLURAL_ICE.match(name)) and name.rstrip().endswith("ice")
+
+
 def extract_grammar_number(intro: str, name: str) -> str:
     """Determine grammatical number from a Czech Wikipedia intro.
 
     Strategy (in order of confidence):
-    1. Explicit keyword "pomnožné" in intro → plural
-    2. Verb agreement directly after the name in the first ~300 chars:
-       "X jsou ..." → plural, "X je ..." → singular
-    3. Any "jsou"/"je" verb in the first sentence as fallback
+    0. Name morphology: hard adjective -é + -ice ending → plural
+    1. Explicit keyword "pomnožn*" in intro → plural
+    2. jsou/je + municipality type word anywhere in first 600 chars
+    3. "se nacházejí" anywhere in first 600 chars → plural
+       ("se nachází" is excluded: "Obec X se nachází" has obec as subject,
+        not the municipality name, so it is ambiguous)
+    4. Name followed by jsou/je within 150 chars
+    5. First two sentences fallback
     """
+    # 0. Name morphology (independent of intro text)
+    if name_implies_plural(name):
+        return PLURAL
+
     if not intro:
         return UNKNOWN
 
-    # 1. Explicit plurale tantum marker
-    if "pomnožné" in intro.lower():
+    # 1. Explicit plurale tantum marker ("pomnožné jméno", "název pomnožný", …)
+    if "pomnožn" in intro.lower():
         return PLURAL
 
-    window = intro[:400]
+    window = intro[:600]
     name_esc = re.escape(name)
+    _MUNI = r"(?:obec|město|vesnice|osada|městys|sídlo|statutární\s+město|část\s+obce)"
 
-    # 2. Verb immediately following the name (with optional short clause in between)
-    if re.search(rf'\b{name_esc}\b[^.{{}}]{{0,80}}\bjsou\b', window, re.IGNORECASE):
+    # 2. jsou/je immediately before a municipality type word (high confidence)
+    if re.search(rf'\bjsou\b\s+{_MUNI}', window, re.IGNORECASE):
         return PLURAL
-    if re.search(rf'\b{name_esc}\b[^.{{}}]{{0,80}}\bje\b', window, re.IGNORECASE):
+    if re.search(rf'\bje\b\s+{_MUNI}', window, re.IGNORECASE):
         return SINGULAR
 
-    # 3. First-sentence fallback (catches "X, město v …, jsou/je …" constructions)
-    first_sent = re.split(r'[.\n]', intro)[0]
-    if re.search(r'\bjsou\b', first_sent):
+    # 3. "se nacházejí" / "nacházejí se" → definitely plural subject
+    if re.search(r'\bnach[aá]zej[íi]\b', window, re.IGNORECASE):
         return PLURAL
-    if re.search(r'\bje\b', first_sent):
+
+    # 4. Name followed by jsou/je (expanded window to 150 chars)
+    if re.search(rf'\b{name_esc}\b[^.{{}}]{{0,150}}\bjsou\b', window, re.IGNORECASE):
+        return PLURAL
+    if re.search(rf'\b{name_esc}\b[^.{{}}]{{0,150}}\bje\b', window, re.IGNORECASE):
         return SINGULAR
+
+    # 5. First two sentences fallback
+    sentences = re.split(r'[.\n]', intro)[:2]
+    for sent in sentences:
+        if re.search(r'\bjsou\b', sent):
+            return PLURAL
+        if re.search(r'\bje\b', sent):
+            return SINGULAR
 
     return UNKNOWN
 
