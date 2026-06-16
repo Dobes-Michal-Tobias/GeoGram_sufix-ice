@@ -30,7 +30,7 @@ def _query(titles: str) -> dict:
         "titles": titles,
         "format": "json",
     }
-    r = requests.get(_API, params=params, headers={"User-Agent": _UA}, timeout=15)
+    r = requests.get(_API, params=params, headers={"User-Agent": _UA}, timeout=(5, 15))
     r.raise_for_status()
     return r.json().get("query", {}).get("pages", {})
 
@@ -44,7 +44,7 @@ def _search(query: str, limit: int = 3) -> list[dict]:
         "srlimit": limit,
         "format": "json",
     }
-    r = requests.get(_API, params=params, headers={"User-Agent": _UA}, timeout=15)
+    r = requests.get(_API, params=params, headers={"User-Agent": _UA}, timeout=(5, 15))
     r.raise_for_status()
     return r.json().get("query", {}).get("search", [])
 
