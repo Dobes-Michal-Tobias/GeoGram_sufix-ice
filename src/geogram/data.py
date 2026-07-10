@@ -32,13 +32,15 @@ def load_municipalities(path: Path, encoding: str = "utf-8", **kwargs) -> pd.Dat
 def load_all_municipalities(
     data_dir: Path = Path("data/raw"),
     population_file: Optional[str] = "pocty_obyvatel/1300722503.xlsx",
+    coordinates_file: Optional[str] = "33bcdd-souradnice-mest-3d4b1fd/souradnice.csv",
 ) -> pd.DataFrame:
-    """Load and integrate all municipality data from RÚIAN and ČSÚ sources."""
+    """Load and integrate all municipality data from RÚIAN, ČSÚ and coordinate sources."""
     return integrate_municipalities(
         ui_obec_path=data_dir / "UI_OBEC.csv",
         ui_okres_path=data_dir / "UI_OKRES.csv",
         ui_vusc_path=data_dir / "UI_VUSC.csv",
         population_path=data_dir / population_file if population_file else None,
+        coordinates_path=data_dir / coordinates_file if coordinates_file else None,
     )
 
 
