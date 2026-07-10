@@ -1,6 +1,7 @@
 """Wikipedia helpers for Czech municipality grammar analysis."""
 
 import re
+import time
 
 import requests
 
@@ -13,26 +14,41 @@ NOT_FOUND = "not_found"
 
 _API = "https://cs.wikipedia.org/w/api.php"
 _UA = "GeoGram/1.0 (research; +https://github.com/yourname/GeoGram_sufix-ice)"
+_RETRIES = 3
+_BACKOFF = 1.5
 
 
 # ---------------------------------------------------------------------------
 # Low-level Wikipedia API helpers
 # ---------------------------------------------------------------------------
 
-def _query(titles: str) -> dict:
+def _get(params: dict) -> dict:
+    """GET against the Wikipedia API with retries on transient network errors."""
+    last_error = None
+    for attempt in range(_RETRIES):
+        try:
+            r = requests.get(_API, params=params, headers={"User-Agent": _UA}, timeout=(5, 15))
+            r.raise_for_status()
+            return r.json()
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            if attempt < _RETRIES - 1:
+                time.sleep(_BACKOFF * (attempt + 1))
+    raise last_error
+
+
+def _query(titles: str, exintro: bool = True) -> dict:
     """Return the pages dict from a Wikipedia API titles query."""
     params = {
         "action": "query",
         "prop": "extracts|pageprops",
-        "exintro": True,
+        "exintro": exintro,
         "explaintext": True,
         "redirects": True,
         "titles": titles,
         "format": "json",
     }
-    r = requests.get(_API, params=params, headers={"User-Agent": _UA}, timeout=(5, 15))
-    r.raise_for_status()
-    return r.json().get("query", {}).get("pages", {})
+    return _get(params).get("query", {}).get("pages", {})
 
 
 def _search(query: str, limit: int = 3) -> list[dict]:
@@ -44,9 +60,7 @@ def _search(query: str, limit: int = 3) -> list[dict]:
         "srlimit": limit,
         "format": "json",
     }
-    r = requests.get(_API, params=params, headers={"User-Agent": _UA}, timeout=(5, 15))
-    r.raise_for_status()
-    return r.json().get("query", {}).get("search", [])
+    return _get(params).get("query", {}).get("search", [])
 
 
 def _page_status(page: dict) -> str:
@@ -70,22 +84,29 @@ def resolve_municipality(
     name: str,
     district_name: str = "",
     region_name: str = "",
+    full_text: bool = False,
 ) -> tuple[str, str]:
-    """Find the Wikipedia intro for a Czech municipality.
+    """Find the Wikipedia article text for a Czech municipality.
 
     Tries three strategies in order:
     1. Exact title match (e.g. "Mohelnice")
     2. Title with district qualifier (e.g. "Bystřice (okres Benešov)")
     3. Full-text search fallback (e.g. "Bystřice obec Benešov")
 
-    Returns (intro_text, resolution_status) where resolution_status is one of:
+    By default returns only the intro paragraph. Pass full_text=True to fetch
+    the entire article body instead (needed for the locative-case fallback,
+    since the boilerplate intro sentence "Obec X se nachází..." never uses it).
+
+    Returns (text, resolution_status) where resolution_status is one of:
       'found'                – exact title matched directly
       'resolved_with_okres'  – disambiguation resolved via "(okres X)" qualifier
       'resolved_with_search' – found via search API
       'missing'              – not found by any strategy
     """
+    exintro = not full_text
+
     # 1. Exact title
-    pages = _query(name)
+    pages = _query(name, exintro=exintro)
     page = next(iter(pages.values()))
     if _page_status(page) == "found":
         return _extract(page), "found"
@@ -93,7 +114,7 @@ def resolve_municipality(
     # 2. Disambiguated title using district name
     if district_name:
         title_okres = f"{name} (okres {district_name})"
-        pages2 = _query(title_okres)
+        pages2 = _query(title_okres, exintro=exintro)
         page2 = next(iter(pages2.values()))
         if _page_status(page2) == "found":
             return _extract(page2), "resolved_with_okres"
@@ -102,13 +123,13 @@ def resolve_municipality(
     query = f"{name} obec {district_name}".strip()
     results = _search(query)
     for hit in results:
-        pages3 = _query(hit["title"])
+        pages3 = _query(hit["title"], exintro=exintro)
         page3 = next(iter(pages3.values()))
         if _page_status(page3) == "found":
-            intro = _extract(page3)
-            # Sanity-check: the intro should mention the municipality name
-            if name.lower() in intro.lower():
-                return intro, "resolved_with_search"
+            text = _extract(page3)
+            # Sanity-check: the text should mention the municipality name
+            if name.lower() in text.lower():
+                return text, "resolved_with_search"
 
     return "", "missing"
 
@@ -189,6 +210,35 @@ def extract_grammar_number(intro: str, name: str) -> str:
         if re.search(r'\bje\b', sent):
             return SINGULAR
 
+    return UNKNOWN
+
+
+def extract_grammar_number_locative(text: str, name: str) -> str:
+    """Fallback: infer grammatical number from Czech locative case forms.
+
+    Feminine -ice names decline differently depending on their number:
+    plural forms take locative "-icích" (e.g. "v Kunčicích"), singular forms
+    take locative "-ici" (e.g. "v Bystřici"). This only shows up in body text
+    (phrases like "narozen v Chroustovicích", "škola v Pticích"), never in the
+    boilerplate intro sentence ("Obec X se nachází...", where "obec" is always
+    singular regardless of X) — so callers should pass the full article text,
+    not just the intro, and use this only when the intro-based extractor
+    returns UNKNOWN.
+
+    Returns UNKNOWN if neither form is attested, or if both are (ambiguous —
+    e.g. a village with a differently-numbered part, like "Ptice"/"Horní Ptici").
+    """
+    if not text or not name.endswith("ice"):
+        return UNKNOWN
+
+    stem = re.escape(name[:-3])
+    has_plural = bool(re.search(rf"{stem}ic[ií]ch\b", text, re.IGNORECASE))
+    has_singular = bool(re.search(rf"\b{stem}ici\b", text, re.IGNORECASE))
+
+    if has_plural and not has_singular:
+        return PLURAL
+    if has_singular and not has_plural:
+        return SINGULAR
     return UNKNOWN
 
 

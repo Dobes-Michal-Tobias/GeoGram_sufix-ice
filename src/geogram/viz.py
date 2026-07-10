@@ -494,10 +494,10 @@ def plot_mismatch_details(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.A
 # 9. Interaktivní mapa (vyžaduje lat/lon sloupce z Wikipedia coordinates API)
 # ---------------------------------------------------------------------------
 
-def plot_map_folium(df: pd.DataFrame, lat_col: str = "lat", lon_col: str = "lon"):
+def plot_map_folium(df: pd.DataFrame, lat_col: str = "latitude", lon_col: str = "longitude"):
     """Folium mapa s body obcí obarvených dle wiki_number.
 
-    Vyžaduje sloupce lat/lon (z Wikipedia prop=coordinates).
+    Vyžaduje sloupce latitude/longitude (z municipalities_ice_integrated.csv).
     Vrací folium.Map — v notebooku display(m), nebo m.save('mapa.html').
     """
     import folium
