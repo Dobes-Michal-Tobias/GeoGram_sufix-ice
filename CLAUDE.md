@@ -24,9 +24,10 @@ notebooks/
   01  intro
   02  filtrace -ice obcí
   03  test IJP parseru (4 obce)
-  04  integrace dat → municipalities_ice_integrated.csv
+  04  integrace dat → municipalities_ice_integrated.csv (vč. souřadnic)
   05  batch IJP ÚJČ klasifikace → ice_grammar_ujc.csv
   06  batch Wikipedia klasifikace → ice_grammar_wiki.csv
+  07  re-klasifikace unknown (intro + lokativní fallback), statistiky, mapa
 ```
 
 ## Aktuální stav (2026-06-15)
@@ -84,6 +85,5 @@ Wikipedia search funguje pouze s diakritickými názvy. Vždy použij sloupec `n
 
 ## Next steps po dokončení klasifikace
 
-1. Notebook 07: srovnání IJP vs. Wikipedia (shoda, neshody, pokrytí)
-2. Notebook 08: mapa ČR s body -ice obcí, barvené dle sg/pl (geopandas / folium)
-3. Statistická analýza: t-test/chi2 sg vs. pl podle populace, průměrného věku, kraje
+1. Mail na ÚJČ pro speciální přístup k IJP (server dosud blokuje IP)
+2. Notebook 07 rozšířit o srovnání IJP vs. Wikipedia, až budou IJP data (funkce ve `viz.py` už připravené: `classify_agreement`, `plot_agreement_*`)
