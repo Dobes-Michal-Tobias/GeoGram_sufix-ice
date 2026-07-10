@@ -1,12 +1,17 @@
 """Visualization functions for GeoGram -ice municipality analysis.
 
-All public functions accept a DataFrame and an optional Axes, returning the Axes.
-Notebooks should only call these functions — no plotting logic lives in notebooks.
+All public functions build and return their own `matplotlib.Figure` (unless an
+`ax` is passed in for composition into a larger grid). Notebooks should only
+call these functions and save the result via `save_fig()` — no plotting logic
+or styling decisions live in notebooks.
 
-Colour palette: Wong (2011) colorblind-safe palette, standard in academic publishing.
+Barevná paleta a rozměry grafů se řídí `src/geogram/config.py` (3 sémantické
+role: PRIMARY / ACCENT / NEUTRAL), stejná konvence jako v PeriodSim.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -15,24 +20,46 @@ import matplotlib.patches as mpatches
 import seaborn as sns
 from scipy import stats
 
+from . import config
+
 # ---------------------------------------------------------------------------
 # Global theme and palette
 # ---------------------------------------------------------------------------
 
-sns.set_theme(style="whitegrid", font_scale=1.05)
 
-# Wong (2011) colorblind-safe palette
+def set_style() -> None:
+    """Nastaví seaborn theme dle config.py. Volej jednou na začátku notebooku."""
+    sns.set_theme(style=config.STYLE, palette=config.PALETTE, font_scale=config.FONT_SCALE)
+
+
+def save_fig(fig: plt.Figure, filename: str, subdir: Path | None = None) -> Path:
+    """Uloží figuru jako PNG do assets/img/geogram/ (pro publikaci na webu)."""
+    target_dir = subdir or config.ASSETS_IMG_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / f"{filename}.png"
+    fig.savefig(path, dpi=config.DPI_SAVE, bbox_inches="tight")
+    return path
+
+
+# Datová paleta — role, ne libovolné barvy:
+#   plural/match        = PRIMARY  (hlavní/očekávaná kategorie)
+#   singular/wiki_only   = NEUTRAL  (vedlejší/srovnávací kategorie)
+#   mismatch             = ACCENT   (jediné legitimní použití accent v projektu:
+#                                    neshoda zdrojů Wikipedia vs. IJP — skutečný
+#                                    "problém", ne jen odlišovací barva)
+#   unknown/both/…       = odstíny šedé z CATEGORICAL_PALETTE (bez dat, ne risk)
 COLORS = {
-    "plural":        "#0173b2",   # blue
-    "singular":      "#de8f05",   # amber
-    "unknown":       "#949494",   # grey
-    "both":          "#029e73",   # teal
+    "plural":        config.PRIMARY_COLOR,
+    "singular":      config.NEUTRAL_COLOR,
+    "both":          config.CATEGORICAL_PALETTE[2],
+    "unknown":       config.CATEGORICAL_PALETTE[3],
+    "not_found":     config.CATEGORICAL_PALETTE[3],
     # IJP agreement categories
-    "match":         "#029e73",   # teal  – both sources agree
-    "mismatch":      "#d55e00",   # vermillion – sources disagree
-    "wiki_only":     "#0173b2",   # blue  – classified only by Wikipedia
-    "ujc_only":      "#cc78bc",   # lavender – classified only by IJP
-    "both_unknown":  "#949494",   # grey  – unknown in both sources
+    "match":         config.PRIMARY_COLOR,
+    "mismatch":      config.ACCENT_COLOR,
+    "wiki_only":     config.NEUTRAL_COLOR,
+    "ujc_only":      config.CATEGORICAL_PALETTE[2],
+    "both_unknown":  config.CATEGORICAL_PALETTE[3],
 }
 
 # ---------------------------------------------------------------------------
@@ -87,18 +114,21 @@ def _classified(df: pd.DataFrame) -> pd.DataFrame:
 # 1. Overview: distribuce sg/pl/unknown
 # ---------------------------------------------------------------------------
 
-def plot_overview(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Axes:
+def plot_overview(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
     """Horizontal bar chart with absolute counts and percentages."""
+    set_style()
     counts = df["wiki_number"].value_counts()
     order = [c for c in ["plural", "singular", "both", "unknown", "not_found"] if c in counts.index]
     labels = {"plural": "Plurál", "singular": "Singulár", "both": "Obojí",
               "unknown": "Neznámé", "not_found": "Nenalezeno"}
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(7, 3))
+        fig, ax = plt.subplots(figsize=(8, 3))
+    else:
+        fig = ax.figure
 
     total = len(df)
-    palette = [COLORS.get(c, "#aaa") for c in order]
+    palette = [COLORS.get(c, config.NEUTRAL_COLOR) for c in order]
     sns.barplot(
         x=[counts[c] for c in order],
         y=[labels.get(c, c) for c in order],
@@ -111,15 +141,18 @@ def plot_overview(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Axes:
     ax.set_xlabel("Počet obcí")
     ax.set_title("Distribuce gramatického čísla obcí -ice\n(zdroj: Wikipedia)")
     ax.set_xlim(0, max(counts) * 1.20)
-    return ax
+    sns.despine(ax=ax, left=True)
+    fig.tight_layout()
+    return fig
 
 
 # ---------------------------------------------------------------------------
 # 2. Stacked bar po krajích
 # ---------------------------------------------------------------------------
 
-def plot_by_region(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Axes:
+def plot_by_region(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
     """Horizontal stacked bar: počet sg/pl per kraj, seřazeno dle % plurálu."""
+    set_style()
     d = df[df["wiki_number"].isin(["singular", "plural"])].copy()
     pivot = (
         d.groupby(["region_name", "wiki_number"])
@@ -132,7 +165,9 @@ def plot_by_region(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Axes:
     short = [_REGION_SHORT.get(r, r) for r in pivot.index]
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(10, 5))
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_WIDE)
+    else:
+        fig = ax.figure
 
     bottom = np.zeros(len(pivot))
     for cat, label in [("plural", "Plurál"), ("singular", "Singulár")]:
@@ -147,18 +182,20 @@ def plot_by_region(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Axes:
 
     ax.set_xlabel("Počet obcí")
     ax.set_title("Singulár vs. plurál dle kraje\n(seřazeno vzestupně dle podílu plurálu)")
-    ax.legend(loc="lower right")
+    ax.legend(loc="lower right", frameon=False)
     ax.invert_yaxis()
     sns.despine(ax=ax, left=True, bottom=False)
-    return ax
+    fig.tight_layout()
+    return fig
 
 
 # ---------------------------------------------------------------------------
 # 3. Stacked bar Čechy / Morava / Vysočina
 # ---------------------------------------------------------------------------
 
-def plot_by_land(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Axes:
+def plot_by_land(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
     """Stacked bar: sg vs. pl pro Čechy / Morava+Slezsko / Vysočina."""
+    set_style()
     d = add_land_column(df)
     d = d[d["wiki_number"].isin(["singular", "plural"])]
     pivot = (
@@ -171,7 +208,9 @@ def plot_by_land(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Axes:
     pivot = pivot.sort_values("pct_pl")
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(6, 4.5))
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_SQUARE)
+    else:
+        fig = ax.figure
 
     bottom = np.zeros(len(pivot))
     for cat, label in [("plural", "Plurál"), ("singular", "Singulár")]:
@@ -185,9 +224,10 @@ def plot_by_land(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Axes:
 
     ax.set_ylabel("Počet obcí")
     ax.set_title("Singulár vs. plurál\ndle historické země")
-    ax.legend()
+    ax.legend(frameon=False)
     sns.despine(ax=ax)
-    return ax
+    fig.tight_layout()
+    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -198,11 +238,12 @@ def plot_population_logistic(
     df: pd.DataFrame,
     ax: plt.Axes | None = None,
     log_scale: bool = True,
-) -> tuple[plt.Axes, object]:
+) -> tuple[plt.Figure, object]:
     """Scatter y=0/1 (sg/pl) × populace + logistická regresní křivka.
 
-    Returns (ax, statsmodels LogitResults).
+    Returns (fig, statsmodels LogitResults).
     """
+    set_style()
     import statsmodels.api as sm
 
     d = df[df["wiki_number"].isin(["singular", "plural"])].dropna(subset=["population_total"])
@@ -214,7 +255,9 @@ def plot_population_logistic(
     result = sm.Logit(d["y"], X).fit(disp=False)
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(8, 5))
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_DEFAULT)
+    else:
+        fig = ax.figure
 
     rng = np.random.default_rng(42)
     jitter = rng.uniform(-0.03, 0.03, size=len(d))
@@ -240,7 +283,8 @@ def plot_population_logistic(
     ax.set_title(f"Logistická regrese: populace → sg/pl\nβ = {coef:.3f}, p = {pval:.2e}")
     ax.legend(frameon=False)
     sns.despine(ax=ax)
-    return ax, result
+    fig.tight_layout()
+    return fig, result
 
 
 # ---------------------------------------------------------------------------
@@ -251,15 +295,18 @@ def plot_population_violin(
     df: pd.DataFrame,
     ax: plt.Axes | None = None,
     log_scale: bool = True,
-) -> plt.Axes:
+) -> plt.Figure:
     """Violin plot: populace_total rozdělená dle wiki_number."""
+    set_style()
     d = df[df["wiki_number"].isin(["singular", "plural"])].dropna(subset=["population_total"])
     d = d[d["population_total"] > 0].copy()
     d["pop_plot"] = np.log10(d["population_total"]) if log_scale else d["population_total"]
     ylabel = "log₁₀(počet obyvatel)" if log_scale else "Počet obyvatel"
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(6, 5))
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_SQUARE)
+    else:
+        fig = ax.figure
 
     order = ["singular", "plural"]
     sns.violinplot(
@@ -279,20 +326,24 @@ def plot_population_violin(
         ax.text(i, ax.get_ylim()[1] * 0.99, label, ha="center", va="top", fontsize=8)
 
     sns.despine(ax=ax)
-    return ax
+    fig.tight_layout()
+    return fig
 
 
 # ---------------------------------------------------------------------------
 # 6. Unknown analýza: velikost nerozpoznaných obcí
 # ---------------------------------------------------------------------------
 
-def plot_missing_analysis(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Axes:
+def plot_missing_analysis(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
     """Histogramy: populace klasifikovaných vs. neznámých obcí."""
+    set_style()
     classified = df[df["wiki_number"].isin(["singular", "plural"]) & (df["population_total"] > 0)]
     unknown = df[(df["wiki_number"] == "unknown") & (df["population_total"] > 0)]
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(8, 4))
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_WIDE)
+    else:
+        fig = ax.figure
 
     bins = np.logspace(
         np.log10(min(classified["population_total"].min(), unknown["population_total"].min())),
@@ -309,7 +360,8 @@ def plot_missing_analysis(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.A
     ax.set_title("Velikost obcí: klasifikované vs. nerozpoznané")
     ax.legend(frameon=False)
     sns.despine(ax=ax)
-    return ax
+    fig.tight_layout()
+    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -378,8 +430,9 @@ def classify_agreement(df: pd.DataFrame,
     return out
 
 
-def plot_agreement_summary(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Axes:
+def plot_agreement_summary(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
     """Sloupcový graf kategorií shody Wikipedia vs. IJP."""
+    set_style()
     if "agreement" not in df.columns:
         df = classify_agreement(df)
 
@@ -388,7 +441,9 @@ def plot_agreement_summary(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.
     total = len(df)
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(8, 4))
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_DEFAULT)
+    else:
+        fig = ax.figure
 
     palette = [COLORS[c] for c in order]
     sns.barplot(
@@ -404,11 +459,13 @@ def plot_agreement_summary(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.
     ax.set_title("Shoda Wikipedia vs. IJP ÚJČ")
     ax.set_xlim(0, max(counts) * 1.22)
     sns.despine(ax=ax, left=True)
-    return ax
+    fig.tight_layout()
+    return fig
 
 
-def plot_agreement_heatmap(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Axes:
+def plot_agreement_heatmap(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
     """Matice záměn (Wikipedia × IJP) jako seaborn heatmap."""
+    set_style()
     if "agreement" not in df.columns:
         df = classify_agreement(df)
 
@@ -420,18 +477,22 @@ def plot_agreement_heatmap(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.
     )
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(5, 4))
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_SQUARE)
+    else:
+        fig = ax.figure
 
     sns.heatmap(
         ct, annot=True, fmt="d", cmap="Blues",
         linewidths=0.5, ax=ax, cbar_kws={"label": "Počet obcí"},
     )
     ax.set_title("Matice záměn: Wikipedia vs. IJP ÚJČ\n(jen klasifikované v obou)")
-    return ax
+    fig.tight_layout()
+    return fig
 
 
-def plot_agreement_by_region(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Axes:
+def plot_agreement_by_region(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
     """Stacked bar: kategorie shody po krajích."""
+    set_style()
     if "agreement" not in df.columns:
         df = classify_agreement(df)
 
@@ -447,7 +508,9 @@ def plot_agreement_by_region(df: pd.DataFrame, ax: plt.Axes | None = None) -> pl
     short = [_REGION_SHORT.get(r, r) for r in pivot.index]
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(10, 5.5))
+        fig, ax = plt.subplots(figsize=(config.FIGSIZE_WIDE[0], 5.5))
+    else:
+        fig = ax.figure
 
     bottom = np.zeros(len(pivot))
     patches = []
@@ -462,36 +525,39 @@ def plot_agreement_by_region(df: pd.DataFrame, ax: plt.Axes | None = None) -> pl
     ax.legend(handles=patches, loc="lower right", fontsize=8)
     ax.invert_yaxis()
     sns.despine(ax=ax, left=True)
-    return ax
+    fig.tight_layout()
+    return fig
 
 
-def plot_mismatch_details(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Axes:
+def plot_mismatch_details(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
     """Bar chart neshodujících se obcí: co říká Wikipedia vs. IJP."""
+    set_style()
     if "agreement" not in df.columns:
         df = classify_agreement(df)
 
     mis = df[df["agreement"] == "mismatch"].copy()
+    if ax is None:
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_DEFAULT if not mis.empty else (6, 3))
+    else:
+        fig = ax.figure
+
     if mis.empty:
-        if ax is None:
-            _, ax = plt.subplots()
         ax.text(0.5, 0.5, "Žádné neshody", ha="center", va="center", transform=ax.transAxes)
-        return ax
+        return fig
 
     label = mis["wiki_number"] + " → " + mis["ujc_number"]
     counts = label.value_counts()
-
-    if ax is None:
-        _, ax = plt.subplots(figsize=(6, max(3, len(counts) * 0.5)))
 
     sns.barplot(x=counts.values, y=counts.index, color=COLORS["mismatch"], ax=ax)
     ax.set_xlabel("Počet obcí")
     ax.set_title(f"Neshody Wikipedia → IJP (n={len(mis)})")
     sns.despine(ax=ax, left=True)
-    return ax
+    fig.tight_layout()
+    return fig
 
 
 # ---------------------------------------------------------------------------
-# 9. Interaktivní mapa (vyžaduje lat/lon sloupce z Wikipedia coordinates API)
+# 9. Interaktivní mapa (jediný interaktivní prvek v projektu — folium)
 # ---------------------------------------------------------------------------
 
 def plot_map_folium(df: pd.DataFrame, lat_col: str = "latitude", lon_col: str = "longitude"):
@@ -506,7 +572,7 @@ def plot_map_folium(df: pd.DataFrame, lat_col: str = "latitude", lon_col: str = 
     m = folium.Map(location=[49.8, 15.5], zoom_start=7, tiles="CartoDB positron")
 
     for _, row in d.iterrows():
-        color = COLORS.get(row.get("wiki_number", "unknown"), "#aaa")
+        color = COLORS.get(row.get("wiki_number", "unknown"), config.NEUTRAL_COLOR)
         folium.CircleMarker(
             location=[row[lat_col], row[lon_col]],
             radius=4, color=color, fill=True, fill_color=color, fill_opacity=0.75,
@@ -514,14 +580,14 @@ def plot_map_folium(df: pd.DataFrame, lat_col: str = "latitude", lon_col: str = 
                    f"{row.get('wiki_number','')} | {int(row.get('population_total',0))} obyv."),
         ).add_to(m)
 
-    legend = """
+    legend = f"""
     <div style="position:fixed;bottom:30px;left:30px;z-index:999;background:white;
                 padding:10px 14px;border:1px solid #ccc;border-radius:6px;font-size:13px;
                 box-shadow:2px 2px 6px rgba(0,0,0,0.15)">
       <b>Gramatické číslo</b><br>
-      <span style="color:#0173b2;">&#9679;</span> Plurál<br>
-      <span style="color:#de8f05;">&#9679;</span> Singulár<br>
-      <span style="color:#949494;">&#9679;</span> Neznámé
+      <span style="color:{COLORS['plural']};">&#9679;</span> Plurál<br>
+      <span style="color:{COLORS['singular']};">&#9679;</span> Singulár<br>
+      <span style="color:{COLORS['unknown']};">&#9679;</span> Neznámé
     </div>"""
     m.get_root().html.add_child(folium.Element(legend))
     return m
