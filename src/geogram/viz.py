@@ -54,6 +54,7 @@ COLORS = {
     "both":          config.CATEGORICAL_PALETTE[2],
     "unknown":       config.CATEGORICAL_PALETTE[3],
     "not_found":     config.CATEGORICAL_PALETTE[3],
+    "error":         config.CATEGORICAL_PALETTE[3],
     # IJP agreement categories
     "match":         config.PRIMARY_COLOR,
     "mismatch":      config.ACCENT_COLOR,
@@ -61,6 +62,8 @@ COLORS = {
     "ujc_only":      config.CATEGORICAL_PALETTE[2],
     "both_unknown":  config.CATEGORICAL_PALETTE[3],
 }
+
+_SOURCE_LABELS = {"wiki_number": "Wikipedia", "ujc_number": "IJP ÚJČ"}
 
 # ---------------------------------------------------------------------------
 # Region helpers
@@ -106,21 +109,21 @@ def add_land_column(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _classified(df: pd.DataFrame) -> pd.DataFrame:
-    return df[df["wiki_number"].isin(["singular", "plural", "both"])]
-
-
 # ---------------------------------------------------------------------------
 # 1. Overview: distribuce sg/pl/unknown
 # ---------------------------------------------------------------------------
 
-def plot_overview(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
-    """Horizontal bar chart with absolute counts and percentages."""
+def plot_overview(df: pd.DataFrame, column: str = "wiki_number", ax: plt.Axes | None = None) -> plt.Figure:
+    """Horizontal bar chart with absolute counts and percentages.
+
+    column: "wiki_number" (default) nebo "ujc_number" — obě mají stejnou
+    sadu kategorií (singular/plural/both/unknown/not_found/error).
+    """
     set_style()
-    counts = df["wiki_number"].value_counts()
-    order = [c for c in ["plural", "singular", "both", "unknown", "not_found"] if c in counts.index]
+    counts = df[column].value_counts()
+    order = [c for c in ["plural", "singular", "both", "unknown", "not_found", "error"] if c in counts.index]
     labels = {"plural": "Plurál", "singular": "Singulár", "both": "Obojí",
-              "unknown": "Neznámé", "not_found": "Nenalezeno"}
+              "unknown": "Neznámé", "not_found": "Nenalezeno", "error": "Chyba"}
 
     if ax is None:
         fig, ax = plt.subplots(figsize=(8, 3))
@@ -139,7 +142,7 @@ def plot_overview(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
         ax.text(n + 15, i, f"{n} ({n/total:.1%})", va="center", fontsize=9)
 
     ax.set_xlabel("Počet obcí")
-    ax.set_title("Distribuce gramatického čísla obcí -ice\n(zdroj: Wikipedia)")
+    ax.set_title(f"Distribuce gramatického čísla obcí -ice\n(zdroj: {_SOURCE_LABELS.get(column, column)})")
     ax.set_xlim(0, max(counts) * 1.20)
     sns.despine(ax=ax, left=True)
     fig.tight_layout()
@@ -150,12 +153,12 @@ def plot_overview(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
 # 2. Stacked bar po krajích
 # ---------------------------------------------------------------------------
 
-def plot_by_region(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
+def plot_by_region(df: pd.DataFrame, column: str = "wiki_number", ax: plt.Axes | None = None) -> plt.Figure:
     """Horizontal stacked bar: počet sg/pl per kraj, seřazeno dle % plurálu."""
     set_style()
-    d = df[df["wiki_number"].isin(["singular", "plural"])].copy()
+    d = df[df[column].isin(["singular", "plural"])].copy()
     pivot = (
-        d.groupby(["region_name", "wiki_number"])
+        d.groupby(["region_name", column])
         .size()
         .unstack(fill_value=0)
     )
@@ -181,7 +184,8 @@ def plot_by_region(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
                 va="center", fontsize=8, color="#444")
 
     ax.set_xlabel("Počet obcí")
-    ax.set_title("Singulár vs. plurál dle kraje\n(seřazeno vzestupně dle podílu plurálu)")
+    ax.set_title(f"Singulár vs. plurál dle kraje ({_SOURCE_LABELS.get(column, column)})\n"
+                 "(seřazeno vzestupně dle podílu plurálu)")
     ax.legend(loc="lower right", frameon=False)
     ax.invert_yaxis()
     sns.despine(ax=ax, left=True, bottom=False)
@@ -193,13 +197,13 @@ def plot_by_region(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
 # 3. Stacked bar Čechy / Morava / Vysočina
 # ---------------------------------------------------------------------------
 
-def plot_by_land(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
+def plot_by_land(df: pd.DataFrame, column: str = "wiki_number", ax: plt.Axes | None = None) -> plt.Figure:
     """Stacked bar: sg vs. pl pro Čechy / Morava+Slezsko / Vysočina."""
     set_style()
     d = add_land_column(df)
-    d = d[d["wiki_number"].isin(["singular", "plural"])]
+    d = d[d[column].isin(["singular", "plural"])]
     pivot = (
-        d.groupby(["land", "wiki_number"])
+        d.groupby(["land", column])
         .size()
         .unstack(fill_value=0)
     )
@@ -223,7 +227,7 @@ def plot_by_land(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
                 ha="center", fontsize=10, fontweight="bold", color="#222")
 
     ax.set_ylabel("Počet obcí")
-    ax.set_title("Singulár vs. plurál\ndle historické země")
+    ax.set_title(f"Singulár vs. plurál ({_SOURCE_LABELS.get(column, column)})\ndle historické země")
     ax.legend(frameon=False)
     sns.despine(ax=ax)
     fig.tight_layout()
@@ -236,6 +240,7 @@ def plot_by_land(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
 
 def plot_population_logistic(
     df: pd.DataFrame,
+    column: str = "wiki_number",
     ax: plt.Axes | None = None,
     log_scale: bool = True,
 ) -> tuple[plt.Figure, object]:
@@ -246,9 +251,9 @@ def plot_population_logistic(
     set_style()
     import statsmodels.api as sm
 
-    d = df[df["wiki_number"].isin(["singular", "plural"])].dropna(subset=["population_total"])
+    d = df[df[column].isin(["singular", "plural"])].dropna(subset=["population_total"])
     d = d[d["population_total"] > 0].copy()
-    d["y"] = (d["wiki_number"] == "plural").astype(int)
+    d["y"] = (d[column] == "plural").astype(int)
 
     x_raw = np.log10(d["population_total"]) if log_scale else d["population_total"]
     X = sm.add_constant(x_raw)
@@ -262,7 +267,7 @@ def plot_population_logistic(
     rng = np.random.default_rng(42)
     jitter = rng.uniform(-0.03, 0.03, size=len(d))
     for cat in ["singular", "plural"]:
-        mask = d["wiki_number"] == cat
+        mask = d[column] == cat
         ax.scatter(
             x_raw[mask], d["y"][mask] + jitter[mask],
             color=COLORS[cat], alpha=0.20, s=9, linewidths=0,
@@ -280,7 +285,8 @@ def plot_population_logistic(
 
     coef = result.params.iloc[1]
     pval = result.pvalues.iloc[1]
-    ax.set_title(f"Logistická regrese: populace → sg/pl\nβ = {coef:.3f}, p = {pval:.2e}")
+    ax.set_title(f"Logistická regrese ({_SOURCE_LABELS.get(column, column)}): populace → sg/pl\n"
+                 f"β = {coef:.3f}, p = {pval:.2e}")
     ax.legend(frameon=False)
     sns.despine(ax=ax)
     fig.tight_layout()
@@ -293,12 +299,13 @@ def plot_population_logistic(
 
 def plot_population_violin(
     df: pd.DataFrame,
+    column: str = "wiki_number",
     ax: plt.Axes | None = None,
     log_scale: bool = True,
 ) -> plt.Figure:
-    """Violin plot: populace_total rozdělená dle wiki_number."""
+    """Violin plot: populace_total rozdělená dle column (wiki_number/ujc_number)."""
     set_style()
-    d = df[df["wiki_number"].isin(["singular", "plural"])].dropna(subset=["population_total"])
+    d = df[df[column].isin(["singular", "plural"])].dropna(subset=["population_total"])
     d = d[d["population_total"] > 0].copy()
     d["pop_plot"] = np.log10(d["population_total"]) if log_scale else d["population_total"]
     ylabel = "log₁₀(počet obyvatel)" if log_scale else "Počet obyvatel"
@@ -310,18 +317,18 @@ def plot_population_violin(
 
     order = ["singular", "plural"]
     sns.violinplot(
-        data=d, x="wiki_number", y="pop_plot", order=order,
+        data=d, x=column, y="pop_plot", order=order,
         palette={k: COLORS[k] for k in order},
         inner="box", density_norm="width", ax=ax,
     )
     ax.set_xticklabels(["Singulár", "Plurál"])
     ax.set_xlabel("")
     ax.set_ylabel(ylabel)
-    ax.set_title("Distribuce populace: singulár vs. plurál")
+    ax.set_title(f"Distribuce populace ({_SOURCE_LABELS.get(column, column)}): singulár vs. plurál")
 
     for i, cat in enumerate(order):
-        med = d.loc[d["wiki_number"] == cat, "pop_plot"].median()
-        n = (d["wiki_number"] == cat).sum()
+        med = d.loc[d[column] == cat, "pop_plot"].median()
+        n = (d[column] == cat).sum()
         label = f"n={n}\nmed={10**med:,.0f}" if log_scale else f"n={n}"
         ax.text(i, ax.get_ylim()[1] * 0.99, label, ha="center", va="top", fontsize=8)
 
@@ -334,11 +341,11 @@ def plot_population_violin(
 # 6. Unknown analýza: velikost nerozpoznaných obcí
 # ---------------------------------------------------------------------------
 
-def plot_missing_analysis(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
+def plot_missing_analysis(df: pd.DataFrame, column: str = "wiki_number", ax: plt.Axes | None = None) -> plt.Figure:
     """Histogramy: populace klasifikovaných vs. neznámých obcí."""
     set_style()
-    classified = df[df["wiki_number"].isin(["singular", "plural"]) & (df["population_total"] > 0)]
-    unknown = df[(df["wiki_number"] == "unknown") & (df["population_total"] > 0)]
+    classified = df[df[column].isin(["singular", "plural"]) & (df["population_total"] > 0)]
+    unknown = df[(df[column] == "unknown") & (df["population_total"] > 0)]
 
     if ax is None:
         fig, ax = plt.subplots(figsize=config.FIGSIZE_WIDE)
@@ -357,7 +364,7 @@ def plot_missing_analysis(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.F
 
     ax.set_xlabel("Počet obyvatel (log škála)")
     ax.set_ylabel("Hustota")
-    ax.set_title("Velikost obcí: klasifikované vs. nerozpoznané")
+    ax.set_title(f"Velikost obcí ({_SOURCE_LABELS.get(column, column)}): klasifikované vs. nerozpoznané")
     ax.legend(frameon=False)
     sns.despine(ax=ax)
     fig.tight_layout()
@@ -368,18 +375,18 @@ def plot_missing_analysis(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.F
 # 7. Statistické testy
 # ---------------------------------------------------------------------------
 
-def chi2_land_test(df: pd.DataFrame) -> dict:
+def chi2_land_test(df: pd.DataFrame, column: str = "wiki_number") -> dict:
     """Chi² test: je distribuce sg/pl nezávislá na historické zemi?"""
-    d = add_land_column(df)[lambda x: x["wiki_number"].isin(["singular", "plural"])]
-    ct = pd.crosstab(d["land"], d["wiki_number"])
+    d = add_land_column(df)[lambda x: x[column].isin(["singular", "plural"])]
+    ct = pd.crosstab(d["land"], d[column])
     chi2, p, dof, _ = stats.chi2_contingency(ct)
     return {"chi2": chi2, "p": p, "dof": dof, "contingency": ct}
 
 
-def chi2_region_test(df: pd.DataFrame) -> dict:
+def chi2_region_test(df: pd.DataFrame, column: str = "wiki_number") -> dict:
     """Chi² test: distribuce sg/pl vs. kraj."""
-    d = df[df["wiki_number"].isin(["singular", "plural"])]
-    ct = pd.crosstab(d["region_name"], d["wiki_number"])
+    d = df[df[column].isin(["singular", "plural"])]
+    ct = pd.crosstab(d["region_name"], d[column])
     chi2, p, dof, _ = stats.chi2_contingency(ct)
     return {"chi2": chi2, "p": p, "dof": dof, "contingency": ct}
 
@@ -560,8 +567,28 @@ def plot_mismatch_details(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.F
 # 9. Interaktivní mapa (jediný interaktivní prvek v projektu — folium)
 # ---------------------------------------------------------------------------
 
+# Na mapě celé ČR dvě podobně syté šedé (singulár/neznámé) vizuálně splývají,
+# ale terakota (ACCENT) se sem nesmí přesunout jako "druhá barva" — ta nese na
+# celém webu jeden konkrétní význam (problém/upozornění), ne kategorii dat.
+# Řešení je vizuální kódování místo další barvy: singulár dostává tmavou,
+# maximálně kontrastní "neutrální" barvu; neznámé/nenalezené je prázdný kroužek
+# (bez výplně) — čte se jako "chybí data", běžná mapová konvence.
+_MAP_STYLE = {
+    "plural":    {"color": config.PRIMARY_COLOR,          "radius": 4, "fill": True,  "fill_opacity": 0.80, "weight": 1},
+    "singular":  {"color": config.CATEGORICAL_PALETTE[2], "radius": 4, "fill": True,  "fill_opacity": 0.85, "weight": 1},
+    "both":      {"color": config.CATEGORICAL_PALETTE[2], "radius": 4, "fill": True,  "fill_opacity": 0.85, "weight": 1},
+}
+_MAP_STYLE_DEFAULT = {
+    "color": config.NEUTRAL_COLOR, "radius": 3, "fill": False, "fill_opacity": 0.0, "weight": 1.5,
+}
+
+
 def plot_map_folium(df: pd.DataFrame, lat_col: str = "latitude", lon_col: str = "longitude"):
     """Folium mapa s body obcí obarvených dle wiki_number.
+
+    Plurál/singulár jsou plné tečky (steelblue/tmavá), neznámé a nenalezené
+    jsou prázdné kroužky — na mapě celé ČR se tak neznámé vizuálně "ztrácí"
+    do pozadí, místo aby soutěžily o pozornost s klasifikovanými kategoriemi.
 
     Vyžaduje sloupce latitude/longitude (z municipalities_ice_integrated.csv).
     Vrací folium.Map — v notebooku display(m), nebo m.save('mapa.html').
@@ -572,12 +599,14 @@ def plot_map_folium(df: pd.DataFrame, lat_col: str = "latitude", lon_col: str = 
     m = folium.Map(location=[49.8, 15.5], zoom_start=7, tiles="CartoDB positron")
 
     for _, row in d.iterrows():
-        color = COLORS.get(row.get("wiki_number", "unknown"), config.NEUTRAL_COLOR)
+        wiki_number = row.get("wiki_number", "unknown")
+        style = _MAP_STYLE.get(wiki_number, _MAP_STYLE_DEFAULT)
         folium.CircleMarker(
             location=[row[lat_col], row[lon_col]],
-            radius=4, color=color, fill=True, fill_color=color, fill_opacity=0.75,
+            radius=style["radius"], color=style["color"], weight=style["weight"],
+            fill=style["fill"], fill_color=style["color"], fill_opacity=style["fill_opacity"],
             popup=(f"<b>{row.get('name','')}</b><br>"
-                   f"{row.get('wiki_number','')} | {int(row.get('population_total',0))} obyv."),
+                   f"{wiki_number} | {int(row.get('population_total',0))} obyv."),
         ).add_to(m)
 
     legend = f"""
@@ -585,9 +614,9 @@ def plot_map_folium(df: pd.DataFrame, lat_col: str = "latitude", lon_col: str = 
                 padding:10px 14px;border:1px solid #ccc;border-radius:6px;font-size:13px;
                 box-shadow:2px 2px 6px rgba(0,0,0,0.15)">
       <b>Gramatické číslo</b><br>
-      <span style="color:{COLORS['plural']};">&#9679;</span> Plurál<br>
-      <span style="color:{COLORS['singular']};">&#9679;</span> Singulár<br>
-      <span style="color:{COLORS['unknown']};">&#9679;</span> Neznámé
+      <span style="color:{_MAP_STYLE['plural']['color']};">&#9679;</span> Plurál<br>
+      <span style="color:{_MAP_STYLE['singular']['color']};">&#9679;</span> Singulár<br>
+      <span style="color:{_MAP_STYLE_DEFAULT['color']};">&#9675;</span> Neznámé
     </div>"""
     m.get_root().html.add_child(folium.Element(legend))
     return m
