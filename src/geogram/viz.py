@@ -794,3 +794,94 @@ def plot_lisa_map(gdf: pd.DataFrame, alpha: float = 0.05, ax: plt.Axes | None = 
     fig.tight_layout()
     return fig
 
+
+# ---------------------------------------------------------------------------
+# 10. Neznámé labely vs. velikost obce — notebook 09
+# ---------------------------------------------------------------------------
+
+def test_unknown_population(df: pd.DataFrame, column: str = "wiki_number") -> dict:
+    """Statistický test: souvisí pravděpodobnost 'unknown' s populací obce?
+
+    Dva doplňkové testy na stejných datech:
+    - Mann-Whitney U (nonparametrický, robustní k šikmému rozdělení populace,
+      nevyžaduje žádnou funkční formu vztahu) — porovnává rozdělení populace
+      unknown vs. klasifikovaných obcí.
+    - Logistická regrese is_unknown ~ log10(populace) (statsmodels) —
+      kvantifikuje směr a velikost efektu (odds ratio) a dává p-value/CI.
+
+    Obce s wiki_number == 'not_found'/'error' jsou vyloučeny (jiná kategorie
+    chybovosti než 'unknown' — viz CLAUDE.md).
+    """
+    import statsmodels.api as sm
+
+    d = df[df[column].isin(["singular", "plural", "unknown"])].dropna(subset=["population_total"])
+    d = d[d["population_total"] > 0].copy()
+    d["is_unknown"] = (d[column] == "unknown").astype(int)
+
+    pop_unknown = d.loc[d["is_unknown"] == 1, "population_total"]
+    pop_classified = d.loc[d["is_unknown"] == 0, "population_total"]
+    u_stat, u_p = stats.mannwhitneyu(pop_unknown, pop_classified, alternative="less")
+
+    x = np.log10(d["population_total"])
+    X = sm.add_constant(x)
+    logit = sm.Logit(d["is_unknown"], X).fit(disp=False)
+    coef = logit.params.iloc[1]
+    ci_low, ci_high = logit.conf_int().iloc[1]
+
+    return {
+        "n": len(d), "n_unknown": int(d["is_unknown"].sum()),
+        "median_pop_unknown": pop_unknown.median(), "median_pop_classified": pop_classified.median(),
+        "mannwhitney_u": u_stat, "mannwhitney_p": u_p,
+        "logit_coef": coef, "logit_p": logit.pvalues.iloc[1],
+        "logit_odds_ratio_per_10x_pop": np.exp(coef),
+        "logit_ci_odds_ratio": (np.exp(ci_low), np.exp(ci_high)),
+        "logit_pseudo_r2": logit.prsquared,
+        "result": logit,
+    }
+
+
+def plot_unknown_population_logistic(df: pd.DataFrame, column: str = "wiki_number",
+                                      ax: plt.Axes | None = None) -> tuple[plt.Figure, object]:
+    """Scatter y=0/1 (klasifikováno/unknown) × log populace + logistická regresní křivka."""
+    set_style()
+    import statsmodels.api as sm
+
+    d = df[df[column].isin(["singular", "plural", "unknown"])].dropna(subset=["population_total"])
+    d = d[d["population_total"] > 0].copy()
+    d["is_unknown"] = (d[column] == "unknown").astype(int)
+
+    x_raw = np.log10(d["population_total"])
+    X = sm.add_constant(x_raw)
+    result = sm.Logit(d["is_unknown"], X).fit(disp=False)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_DEFAULT)
+    else:
+        fig = ax.figure
+
+    rng = np.random.default_rng(42)
+    jitter = rng.uniform(-0.03, 0.03, size=len(d))
+    labels = {0: ("Klasifikováno", config.PRIMARY_COLOR), 1: ("Neznámé", COLORS["unknown"])}
+    for val, (label, color) in labels.items():
+        mask = d["is_unknown"] == val
+        ax.scatter(x_raw[mask], d["is_unknown"][mask] + jitter[mask],
+                    color=color, alpha=0.20, s=9, linewidths=0, label=label)
+
+    x_line = np.linspace(x_raw.min(), x_raw.max(), 300)
+    X_line = sm.add_constant(x_line)
+    ax.plot(x_line, result.predict(X_line), color="#222", lw=2.2, label="Logistická regrese")
+
+    ax.set_xlabel("log₁₀(počet obyvatel)")
+    ax.set_ylabel("")
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(["Klasifikováno", "Neznámé"])
+
+    coef = result.params.iloc[1]
+    pval = result.pvalues.iloc[1]
+    ax.set_title(f"Logistická regrese ({_SOURCE_LABELS.get(column, column)}): populace → neznámý label\n"
+                 f"β = {coef:.3f}, OR (na 10× populaci) = {np.exp(coef):.3f}, p = {pval:.2e}")
+    ax.legend(frameon=False)
+    sns.despine(ax=ax)
+    fig.tight_layout()
+    return fig, result
+
