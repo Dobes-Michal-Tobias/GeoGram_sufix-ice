@@ -620,3 +620,177 @@ def plot_map_folium(df: pd.DataFrame, lat_col: str = "latitude", lon_col: str = 
     </div>"""
     m.get_root().html.add_child(folium.Element(legend))
     return m
+
+
+# ---------------------------------------------------------------------------
+# 9. Prostorová segregace sg/pl (join-count, Moran's I) — notebook 08
+#
+# Otázka "leží stejné labely (plurál/singulár) blíž sobě navzájem, než by
+# odpovídalo náhodnému rozmístění týchž labelů na týchž souřadnicích?" se
+# testuje join-count statistikou (Cliff & Ord) a binárním Moran's I, oba s
+# permutační (Monte Carlo) inferencí — klasické p-value zde nejsou platná,
+# protože prostorová data nejsou i.i.d. (Toblerův zákon).
+# ---------------------------------------------------------------------------
+
+def build_knn_weights(df: pd.DataFrame, k: int = 6,
+                       lat_col: str = "latitude", lon_col: str = "longitude"):
+    """Projikuje lat/lon do S-JTSK (EPSG:5514, metrické) a postaví k-NN spatial weights.
+
+    Vrací (gdf, w): gdf s metrickými souřadnicemi seřazený stejně jako
+    w.id_order (0..n-1), a libpysal.weights.KNN objekt.
+    """
+    import geopandas as gpd
+    from libpysal.weights import KNN
+
+    d = df.dropna(subset=[lat_col, lon_col]).reset_index(drop=True)
+    gdf = gpd.GeoDataFrame(
+        d, geometry=gpd.points_from_xy(d[lon_col], d[lat_col]), crs="EPSG:4326"
+    ).to_crs("EPSG:5514")
+    w = KNN.from_dataframe(gdf, k=k)
+    return gdf, w
+
+
+def join_count_test(df: pd.DataFrame, column: str = "wiki_number",
+                     k: int = 6, permutations: int = 9999, seed: int = 42) -> dict:
+    """Join-count test prostorové segregace sg/pl na k-NN grafu (esda.Join_Counts).
+
+    plurál kóduje se jako "B" (1), singulár jako "W" (0). bb/ww = počet
+    sousedících dvojic se stejným labelem, bw = smíšené dvojice. p_sim_*
+    je podíl z `permutations` náhodných přeskupení labelů na týchž
+    souřadnicích, které dosáhly stejně extrémní hodnoty jako pozorovaná
+    (random-labeling null model) — vhodná inference pro prostorová data.
+
+    Vrací dict s pozorovanými/očekávanými počty joinů a permutačními p-values.
+    """
+    from esda.join_counts import Join_Counts
+
+    np.random.seed(seed)
+    d = df[df[column].isin(["singular", "plural"])].copy()
+    gdf, w = build_knn_weights(d, k=k)
+    y = (gdf[column] == "plural").astype(int).values
+
+    jc = Join_Counts(y, w, permutations=permutations)
+
+    return {
+        "bb_obs": jc.bb, "bb_exp": jc.mean_bb, "p_sim_bb": jc.p_sim_bb,
+        "ww_obs": jc.ww, "bw_obs": jc.bw, "bw_exp": jc.mean_bw, "p_sim_bw": jc.p_sim_bw,
+        "chi2": jc.chi2, "chi2_p": jc.chi2_p,
+        "k": k, "n": len(gdf), "permutations": permutations,
+        "n_plural": int(y.sum()), "n_singular": int((1 - y).sum()),
+        "result": jc,
+    }
+
+
+def moran_binary_test(df: pd.DataFrame, column: str = "wiki_number",
+                       k: int = 6, permutations: int = 9999, seed: int = 42) -> dict:
+    """Globální Moran's I pro binární proměnnou (1=plurál, 0=singulár) na k-NN grafu.
+
+    Doplňkový, obecně známý ukazatel prostorové autokorelace k
+    `join_count_test()`. Row-standardizované váhy (w.transform='r'),
+    permutační p-value (esda.Moran).
+    """
+    from esda.moran import Moran
+
+    np.random.seed(seed)
+    d = df[df[column].isin(["singular", "plural"])].copy()
+    gdf, w = build_knn_weights(d, k=k)
+    w.transform = "r"
+    y = (gdf[column] == "plural").astype(float).values
+
+    mi = Moran(y, w, permutations=permutations)
+
+    return {
+        "I": mi.I, "EI": mi.EI, "z_sim": mi.z_sim, "p_sim": mi.p_sim,
+        "k": k, "n": len(gdf), "permutations": permutations,
+        "result": mi,
+    }
+
+
+def plot_moran_scatter(moran_result, ax: plt.Axes | None = None) -> plt.Figure:
+    """Moran scatterplot: hodnota obce (x) vs. prostorově zpožděný průměr sousedů (y)."""
+    set_style()
+    from libpysal.weights import lag_spatial
+
+    y = moran_result.z
+    ylag = lag_spatial(moran_result.w, y)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_SQUARE)
+    else:
+        fig = ax.figure
+
+    ax.scatter(y, ylag, color=config.PRIMARY_COLOR, alpha=0.35, s=14, linewidths=0)
+    b, a = np.polyfit(y, ylag, 1)
+    x_line = np.linspace(y.min(), y.max(), 100)
+    ax.plot(x_line, a + b * x_line, color=config.ACCENT_COLOR, lw=2, label=f"I = {moran_result.I:.3f}")
+    ax.axhline(0, color="#999", lw=0.8)
+    ax.axvline(0, color="#999", lw=0.8)
+    ax.set_xlabel("Label obce (centrovaný, 1=plurál/0=singulár)")
+    ax.set_ylabel("Prostorově zpožděný průměr sousedů")
+    ax.set_title(f"Moran scatterplot (p_sim = {moran_result.p_sim:.4f}, {moran_result.permutations} permutací)")
+    ax.legend(frameon=False)
+    sns.despine(ax=ax)
+    fig.tight_layout()
+    return fig
+
+
+def moran_local_test(df: pd.DataFrame, column: str = "wiki_number",
+                      k: int = 6, permutations: int = 999, seed: int = 42):
+    """LISA (Local Indicators of Spatial Association) — KDE lokálních shluků.
+
+    Doplněk ke globálnímu `moran_binary_test()`: globální test řekne "shlukuje
+    se to", LISA řekne KDE. Vrací (gdf, esda.Moran_Local) — gdf má navíc
+    sloupce `lisa_q` (kvadrant: 1=HH, 2=LH, 3=LL, 4=HL) a `lisa_p` (permutační
+    p-value pro daný bod), gdf řazený stejně jako výsledek Moran_Local.
+    """
+    from esda.moran import Moran_Local
+
+    d = df[df[column].isin(["singular", "plural"])].copy()
+    gdf, w = build_knn_weights(d, k=k)
+    w.transform = "r"
+    y = (gdf[column] == "plural").astype(float).values
+
+    ml = Moran_Local(y, w, permutations=permutations, seed=seed)
+    gdf["lisa_q"] = ml.q
+    gdf["lisa_p"] = ml.p_sim
+    return gdf, ml
+
+
+def plot_lisa_map(gdf: pd.DataFrame, alpha: float = 0.05, ax: plt.Axes | None = None) -> plt.Figure:
+    """Mapa significantních LISA shluků (výstup `moran_local_test`).
+
+    HH (plurál obklopený plurálem) a LL (singulár obklopený singulárem) jsou
+    "typické" shluky — plná PRIMARY/NEUTRAL barva. HL/LH (obec jiného labelu
+    než sousedi) jsou prostorové anomálie — ACCENT, stejná sémantika jako
+    jinde v projektu (skutečná neshoda/výjimka, ne jen odlišení). Body s
+    p >= alpha (nevýznamné) jsou tenké šedé tečky v pozadí.
+    """
+    set_style()
+    _LISA_LABELS = {1: "HH (plurál shluk)", 2: "LH (anomálie)", 3: "LL (singulár shluk)", 4: "HL (anomálie)"}
+    _LISA_COLORS = {1: config.PRIMARY_COLOR, 2: config.ACCENT_COLOR,
+                     3: config.NEUTRAL_COLOR, 4: config.ACCENT_COLOR}
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_SQUARE)
+    else:
+        fig = ax.figure
+
+    sig = gdf[gdf["lisa_p"] < alpha]
+    nonsig = gdf[gdf["lisa_p"] >= alpha]
+
+    ax.scatter(nonsig.geometry.x, nonsig.geometry.y, color="#ccc", s=6, alpha=0.4, linewidths=0,
+               label=f"Nevýznamné (p ≥ {alpha})")
+    for q, label in _LISA_LABELS.items():
+        m = sig[sig["lisa_q"] == q]
+        if len(m):
+            ax.scatter(m.geometry.x, m.geometry.y, color=_LISA_COLORS[q], s=22, alpha=0.85,
+                       linewidths=0, label=f"{label} (n={len(m)})")
+
+    ax.set_title(f"LISA — lokální shluky sg/pl (p < {alpha})")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.legend(frameon=False, fontsize=8, loc="upper left")
+    sns.despine(ax=ax, left=True, bottom=True)
+    fig.tight_layout()
+    return fig
+
