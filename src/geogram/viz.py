@@ -885,3 +885,151 @@ def plot_unknown_population_logistic(df: pd.DataFrame, column: str = "wiki_numbe
     fig.tight_layout()
     return fig, result
 
+
+# ---------------------------------------------------------------------------
+# 10b. Kde na ose populace leží unknown — srovnání všech 3 labelů najednou
+#
+# test_unknown_population() se ptá "P(unknown | populace)" a slučuje
+# singular+plural do jedné "klasifikované" skupiny — vhodné pro odds ratio,
+# ale plurál (1410 obcí) tam čítá stejně jako singulár (233), takže případný
+# rozdíl mezi singulár a plurál se v tom "zprůměruje" pryč. Otázka "kde na
+# diskrétní ose populace leží unknown, ve srovnání se VŠEMI třemi labely
+# zvlášť" potřebuje 3skupinové srovnání, ne 2skupinové.
+# ---------------------------------------------------------------------------
+
+_LABEL_ORDER = ["singular", "plural", "unknown"]
+_LABEL_TITLES = {"singular": "Singulár", "plural": "Plurál", "unknown": "Neznámé"}
+
+
+def _population_by_label(df: pd.DataFrame, column: str = "wiki_number") -> pd.DataFrame:
+    d = df[df[column].isin(_LABEL_ORDER)].dropna(subset=["population_total"])
+    return d[d["population_total"] > 0].copy()
+
+
+def plot_population_by_label(df: pd.DataFrame, column: str = "wiki_number",
+                              kind: str = "box", ax: plt.Axes | None = None) -> plt.Figure:
+    """Box nebo violin plot: log(populace) pro všechny 3 labely vedle sebe.
+
+    kind="box" (výchozí) ukazuje medián/kvartily/outliery přehledně a čitelně
+    i při silně nevyrovnaných velikostech skupin (1410 vs. 233 vs. 163).
+    kind="violin" navíc ukazuje tvar celého rozdělení (např. bimodalitu).
+    """
+    set_style()
+    d = _population_by_label(df, column)
+    d["log_pop"] = np.log10(d["population_total"])
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_SQUARE)
+    else:
+        fig = ax.figure
+
+    palette = {c: COLORS[c] for c in _LABEL_ORDER}
+    plot_fn = sns.violinplot if kind == "violin" else sns.boxplot
+    kwargs = {"cut": 0} if kind == "violin" else {"showfliers": True, "width": 0.5}
+    plot_fn(data=d, x=column, y="log_pop", order=_LABEL_ORDER, hue=column, palette=palette,
+            legend=False, ax=ax, **kwargs)
+
+    ns = d[column].value_counts()
+    ax.set_xticklabels([f"{_LABEL_TITLES[c]}\n(n={ns.get(c, 0)})" for c in _LABEL_ORDER])
+    ax.set_xlabel("")
+    ax.set_ylabel("log₁₀(počet obyvatel)")
+    kind_label = "Violin" if kind == "violin" else "Box"
+    ax.set_title(f"{kind_label} plot: populace dle labelu ({_SOURCE_LABELS.get(column, column)})")
+    sns.despine(ax=ax)
+    fig.tight_layout()
+    return fig
+
+
+def plot_population_density_by_label(df: pd.DataFrame, column: str = "wiki_number",
+                                      ax: plt.Axes | None = None) -> plt.Figure:
+    """Překrývající se hustoty (KDE) log(populace) pro všechny 3 labely.
+
+    Přímo odpovídá na "je unknown jen dole na ose populace, nebo je
+    rozprostřené po celé škále jako plurál/singulár?" — pokud je křivka
+    unknown posunutá doleva vůči plurálu/singuláru, jsou malé obce
+    nadreprezentované; pokud kopíruje jejich tvar, rozmístění je podobné.
+    """
+    set_style()
+    d = _population_by_label(df, column)
+    d["log_pop"] = np.log10(d["population_total"])
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_WIDE)
+    else:
+        fig = ax.figure
+
+    for c in _LABEL_ORDER:
+        vals = d.loc[d[column] == c, "log_pop"]
+        sns.kdeplot(vals, ax=ax, color=COLORS[c], fill=True, alpha=0.25, lw=2,
+                    label=f"{_LABEL_TITLES[c]} (n={len(vals)})", cut=0)
+        ax.axvline(vals.median(), color=COLORS[c], lw=1.2, ls="--", alpha=0.8)
+
+    ax.set_xlabel("log₁₀(počet obyvatel)  (čárkovaně: mediány)")
+    ax.set_ylabel("Hustota")
+    ax.set_title(f"Rozdělení populace dle labelu ({_SOURCE_LABELS.get(column, column)})")
+    ax.legend(frameon=False)
+    sns.despine(ax=ax)
+    fig.tight_layout()
+    return fig
+
+
+def plot_population_ecdf_by_label(df: pd.DataFrame, column: str = "wiki_number",
+                                   ax: plt.Axes | None = None) -> plt.Figure:
+    """Empirická distribuční funkce (ECDF) log(populace) pro všechny 3 labely.
+
+    ECDF dělá stochastickou dominanci vizuálně přímočarou: pokud křivka
+    unknown leží nad ostatními (dřív dosáhne vyšších percentilů při nižší
+    populaci), unknown obce jsou systematicky menší — přesně to, co testuje
+    Mann-Whitney U v `test_unknown_population()`, jen jako obrázek místo čísla.
+    """
+    set_style()
+    d = _population_by_label(df, column)
+    d["log_pop"] = np.log10(d["population_total"])
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_WIDE)
+    else:
+        fig = ax.figure
+
+    for c in _LABEL_ORDER:
+        vals = d.loc[d[column] == c, "log_pop"]
+        sns.ecdfplot(vals, ax=ax, color=COLORS[c], lw=2.2, label=f"{_LABEL_TITLES[c]} (n={len(vals)})")
+
+    ax.set_xlabel("log₁₀(počet obyvatel)")
+    ax.set_ylabel("Kumulativní podíl obcí")
+    ax.set_title(f"ECDF: populace dle labelu ({_SOURCE_LABELS.get(column, column)})")
+    ax.legend(frameon=False, loc="lower right")
+    sns.despine(ax=ax)
+    fig.tight_layout()
+    return fig
+
+
+def test_population_by_label(df: pd.DataFrame, column: str = "wiki_number") -> dict:
+    """Kruskal-Wallis test (3+ skupin) + párové Mann-Whitney s Bonferroniho korekcí.
+
+    Kruskal-Wallis je nonparametrická obdoba ANOVA — testuje, zda se
+    rozdělení populace liší napříč všemi třemi labely najednou (omnibus test),
+    bez předpokladu normality (populace je silně šikmá). Pokud vyjde
+    významný, následné párové Mann-Whitney testy (singular-plural,
+    singular-unknown, plural-unknown) ukážou, KTERÉ dvojice se liší — s
+    Bonferroniho korekcí (×3 srovnání), aby se neinflovala chyba I. druhu.
+    """
+    d = _population_by_label(df, column)
+    groups = {c: d.loc[d[column] == c, "population_total"] for c in _LABEL_ORDER}
+
+    h_stat, kw_p = stats.kruskal(*groups.values())
+
+    pairs = [("singular", "plural"), ("singular", "unknown"), ("plural", "unknown")]
+    pairwise = {}
+    for a, b in pairs:
+        u_stat, p = stats.mannwhitneyu(groups[a], groups[b], alternative="two-sided")
+        pairwise[f"{a}_vs_{b}"] = {
+            "u": u_stat, "p_raw": p, "p_bonferroni": min(p * len(pairs), 1.0),
+            "median_a": groups[a].median(), "median_b": groups[b].median(),
+        }
+
+    return {
+        "n": len(d), "medians": {c: groups[c].median() for c in _LABEL_ORDER},
+        "kruskal_h": h_stat, "kruskal_p": kw_p,
+        "pairwise": pairwise,
+    }
