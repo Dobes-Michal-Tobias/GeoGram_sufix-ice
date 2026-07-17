@@ -1004,6 +1004,37 @@ def plot_population_ecdf_by_label(df: pd.DataFrame, column: str = "wiki_number",
     return fig
 
 
+def _kruskal_pairwise(groups: dict[str, pd.Series]) -> dict:
+    """Kruskal-Wallis omnibus test (3+ skupin) + párové Mann-Whitney s Bonferroniho korekcí.
+
+    Sdílená implementace pro libovolnou spojitou proměnnou srovnávanou napříč
+    labely singular/plural/unknown (populace v `test_population_by_label`,
+    prostorové skóre v `test_neighbor_share_by_label`). Kruskal-Wallis je
+    nonparametrická obdoba ANOVA — netestuje žádný konkrétní pár, jen "liší
+    se rozdělení napříč skupinami vůbec". Teprve pokud vyjde významný, mají
+    smysl párové Mann-Whitney testy — s Bonferroniho korekcí (×počet párů),
+    aby násobné testování neinflovalo chybu I. druhu.
+    """
+    order = [c for c in _LABEL_ORDER if c in groups]
+    h_stat, kw_p = stats.kruskal(*[groups[c] for c in order])
+
+    pairs = [(a, b) for i, a in enumerate(order) for b in order[i + 1:]]
+    pairwise = {}
+    for a, b in pairs:
+        u_stat, p = stats.mannwhitneyu(groups[a], groups[b], alternative="two-sided")
+        pairwise[f"{a}_vs_{b}"] = {
+            "u": u_stat, "p_raw": p, "p_bonferroni": min(p * len(pairs), 1.0),
+            "median_a": groups[a].median(), "median_b": groups[b].median(),
+        }
+
+    return {
+        "n": sum(len(g) for g in groups.values()),
+        "medians": {c: groups[c].median() for c in order},
+        "kruskal_h": h_stat, "kruskal_p": kw_p,
+        "pairwise": pairwise,
+    }
+
+
 def test_population_by_label(df: pd.DataFrame, column: str = "wiki_number") -> dict:
     """Kruskal-Wallis test (3+ skupin) + párové Mann-Whitney s Bonferroniho korekcí.
 
@@ -1016,20 +1047,4 @@ def test_population_by_label(df: pd.DataFrame, column: str = "wiki_number") -> d
     """
     d = _population_by_label(df, column)
     groups = {c: d.loc[d[column] == c, "population_total"] for c in _LABEL_ORDER}
-
-    h_stat, kw_p = stats.kruskal(*groups.values())
-
-    pairs = [("singular", "plural"), ("singular", "unknown"), ("plural", "unknown")]
-    pairwise = {}
-    for a, b in pairs:
-        u_stat, p = stats.mannwhitneyu(groups[a], groups[b], alternative="two-sided")
-        pairwise[f"{a}_vs_{b}"] = {
-            "u": u_stat, "p_raw": p, "p_bonferroni": min(p * len(pairs), 1.0),
-            "median_a": groups[a].median(), "median_b": groups[b].median(),
-        }
-
-    return {
-        "n": len(d), "medians": {c: groups[c].median() for c in _LABEL_ORDER},
-        "kruskal_h": h_stat, "kruskal_p": kw_p,
-        "pairwise": pairwise,
-    }
+    return _kruskal_pairwise(groups)
