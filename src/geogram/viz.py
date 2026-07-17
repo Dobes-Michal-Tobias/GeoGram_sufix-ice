@@ -11,6 +11,7 @@ role: PRIMARY / ACCENT / NEUTRAL), stejná konvence jako v PeriodSim.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -1326,6 +1327,129 @@ def plot_suffix_detail(df: pd.DataFrame, column: str = "wiki_number",
     ax.set_xlabel("Podíl plurálu")
     ax.set_xlim(0, 1.15)
     ax.set_title(f"Podíl plurálu dle koncovky (posledních 5 písmen, n ≥ {min_n})")
+    sns.despine(ax=ax, left=True)
+    fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# 13. Multivariátní syntéza: sufix + populace + region v jednom modelu (nb12)
+#
+# Vstupní df musí mít sloupec `suffix_group` (viz `morphology.add_suffix_column`).
+# ---------------------------------------------------------------------------
+
+_MODEL_SPECS = [
+    ("populace",                  "y ~ log_pop"),
+    ("region",                    "y ~ C(land)"),
+    ("sufix",                     "y ~ C(suffix_group)"),
+    ("sufix + populace",          "y ~ C(suffix_group) + log_pop"),
+    ("sufix + populace + region", "y ~ C(suffix_group) + log_pop + C(land)"),
+]
+
+
+def fit_nested_logit_models(df: pd.DataFrame, column: str = "wiki_number") -> dict[str, object]:
+    """Nafituje 5 (vnořených) logistických modelů sg/pl na stejném vzorku.
+
+    Cíl: kvantifikovat, kolik variance sg/pl vysvětlí sufix samotný oproti
+    populaci/regionu, a jestli populace/region přidají cokoli NAD RÁMEC
+    sufixu. `-ovice` (98 % plurál, nb11) v datech nezpůsobuje perfektní
+    separaci (11 protipříkladů existuje) — model konverguje bez regularizace.
+
+    Vrací dict {název_modelu: statsmodels LogitResults}, v pořadí ze
+    `_MODEL_SPECS` (populace / region / sufix / sufix+populace /
+    sufix+populace+region) — použij pro pseudo-R² progresi a LR testy.
+    """
+    import statsmodels.formula.api as smf
+
+    d = df[df[column].isin(["singular", "plural"])].dropna(subset=["population_total"]).copy()
+    d = d[d["population_total"] > 0]
+    d = add_land_column(d)
+    d["y"] = (d[column] == "plural").astype(int)
+    d["log_pop"] = np.log10(d["population_total"])
+
+    return {name: smf.logit(formula, data=d).fit(disp=0) for name, formula in _MODEL_SPECS}
+
+
+def lr_test(model_small, model_big) -> dict:
+    """Likelihood-ratio test mezi dvěma vnořenými modely (menší je podmnožina většího).
+
+    Testuje, jestli přidané proměnné modelu `model_big` vysvětlují
+    statisticky významně víc, než by se čekalo náhodou — na rozdíl od
+    pouhého srovnání pseudo-R² (které vždy roste přidáním proměnných, ať
+    užitečných nebo ne).
+    """
+    lr_stat = 2 * (model_big.llf - model_small.llf)
+    df_diff = model_big.df_model - model_small.df_model
+    p = stats.chi2.sf(lr_stat, df_diff)
+    return {"lr": lr_stat, "df": df_diff, "p": p}
+
+
+def plot_pseudo_r2_progression(models: dict[str, object], ax: plt.Axes | None = None) -> plt.Figure:
+    """Bar chart: McFadden pseudo-R² pro každý model z `fit_nested_logit_models()`."""
+    set_style()
+    names = list(models.keys())
+    r2 = [models[n].prsquared for n in names]
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_WIDE)
+    else:
+        fig = ax.figure
+
+    ax.barh(names, r2, color=config.PRIMARY_COLOR)
+    for i, v in enumerate(r2):
+        ax.text(v + 0.003, i, f"{v:.3f}", va="center", fontsize=9)
+
+    ax.set_xlabel("Pseudo-R² (McFadden)")
+    ax.set_title("Kolik variance sg/pl vysvětlí který model")
+    ax.invert_yaxis()
+    sns.despine(ax=ax, left=True)
+    fig.tight_layout()
+    return fig
+
+
+def _pretty_coef_name(raw: str) -> str:
+    m = re.match(r"C\((\w+)\)\[T\.(.+)\]", raw)
+    if raw == "log_pop":
+        return "log₁₀(populace)"
+    if raw == "Intercept":
+        return "Intercept"
+    if m:
+        factor, level = m.groups()
+        if factor == "suffix_group":
+            return f"{SUFFIX_TITLES.get(level, level)}  (vs. {SUFFIX_TITLES['bare_ice']})"
+        if factor == "land":
+            return f"{level}  (vs. Morava)"
+    return raw
+
+
+def plot_model_coefficients(model, ax: plt.Axes | None = None) -> plt.Figure:
+    """Forest plot: koeficienty finálního modelu (log-odds) s 95% CI, bez interceptu.
+
+    Barva sama nekóduje "riziko" (ACCENT se v projektu vyhrazuje jen pro
+    to) — všechny koeficienty jsou PRIMARY, nula (žádný efekt) je
+    referenční čárkovaná čára.
+    """
+    set_style()
+    params = model.params.drop("Intercept")
+    conf = model.conf_int().drop("Intercept")
+    order = params.reindex(params.abs().sort_values().index).index
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_SQUARE)
+    else:
+        fig = ax.figure
+
+    for i, name in enumerate(order):
+        coef = params[name]
+        lo, hi = conf.loc[name]
+        ax.errorbar(coef, i, xerr=[[coef - lo], [hi - coef]], fmt="o",
+                     color=config.PRIMARY_COLOR, capsize=3, markersize=6, lw=1.5)
+
+    ax.axvline(0, color="#999", lw=1, ls="--")
+    ax.set_yticks(range(len(order)))
+    ax.set_yticklabels([_pretty_coef_name(n) for n in order])
+    ax.set_xlabel("Koeficient (log-odds) → plurál, s 95% CI")
+    ax.set_title("Finální model: sufix + populace + region")
     sns.despine(ax=ax, left=True)
     fig.tight_layout()
     return fig
