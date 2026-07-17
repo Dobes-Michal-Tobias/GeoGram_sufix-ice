@@ -21,6 +21,7 @@ import seaborn as sns
 from scipy import stats
 
 from . import config
+from .morphology import SUFFIX_ORDER, SUFFIX_TITLES, suffix_ending
 
 # ---------------------------------------------------------------------------
 # Global theme and palette
@@ -1172,3 +1173,159 @@ def test_neighbor_share_by_label(df_with_share: pd.DataFrame, column: str = "wik
     d = df_with_share.dropna(subset=["plural_neighbor_share"])
     groups = {c: d.loc[d[column] == c, "plural_neighbor_share"] for c in _LABEL_ORDER}
     return _kruskal_pairwise(groups)
+
+
+# ---------------------------------------------------------------------------
+# 12. Sufixální morfologie vs. gramatické číslo (notebook 11)
+#
+# Vstupní df musí mít sloupec `suffix_group` (viz `morphology.add_suffix_column`).
+# ---------------------------------------------------------------------------
+
+def plot_suffix_overview(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
+    """Bar chart: počet obcí v každé sufixální skupině."""
+    set_style()
+    counts = df["suffix_group"].value_counts()
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 3))
+    else:
+        fig = ax.figure
+
+    total = len(df)
+    palette = [config.CATEGORICAL_PALETTE[i] for i in range(len(SUFFIX_ORDER))]
+    sns.barplot(x=[counts.get(c, 0) for c in SUFFIX_ORDER],
+                y=[SUFFIX_TITLES[c] for c in SUFFIX_ORDER],
+                palette=palette, orient="h", ax=ax)
+    for i, c in enumerate(SUFFIX_ORDER):
+        n = counts.get(c, 0)
+        ax.text(n + 15, i, f"{n} ({n/total:.1%})", va="center", fontsize=9)
+
+    ax.set_xlabel("Počet obcí")
+    ax.set_title("Sufixální skupiny obcí -ice")
+    ax.set_xlim(0, counts.max() * 1.20)
+    sns.despine(ax=ax, left=True)
+    fig.tight_layout()
+    return fig
+
+
+def plot_by_suffix(df: pd.DataFrame, column: str = "wiki_number", ax: plt.Axes | None = None) -> plt.Figure:
+    """Stacked bar: sg vs. pl podíl v každé sufixální skupině (analogie plot_by_land)."""
+    set_style()
+    d = df[df[column].isin(["singular", "plural"])]
+    pivot = d.groupby(["suffix_group", column]).size().unstack(fill_value=0)
+    pivot = pivot.reindex(SUFFIX_ORDER)
+    pivot["total"] = pivot.sum(axis=1)
+    pivot["pct_pl"] = pivot.get("plural", 0) / pivot["total"]
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_SQUARE)
+    else:
+        fig = ax.figure
+
+    bottom = np.zeros(len(pivot))
+    for cat, label in [("plural", "Plurál"), ("singular", "Singulár")]:
+        vals = pivot.get(cat, pd.Series(0, index=pivot.index)).values
+        ax.bar([SUFFIX_TITLES[c] for c in pivot.index], vals, bottom=bottom, label=label, color=COLORS[cat])
+        bottom += vals
+
+    for i, (_, row) in enumerate(pivot.iterrows()):
+        ax.text(i, row["total"] + 5, f"{row['pct_pl']:.0%}", ha="center", fontsize=10, fontweight="bold", color="#222")
+
+    ax.set_ylabel("Počet obcí")
+    ax.set_title(f"Singulár vs. plurál dle sufixální skupiny ({_SOURCE_LABELS.get(column, column)})")
+    ax.legend(frameon=False)
+    sns.despine(ax=ax)
+    fig.tight_layout()
+    return fig
+
+
+def chi2_suffix_test(df: pd.DataFrame, column: str = "wiki_number") -> dict:
+    """Chi² test: je distribuce sg/pl nezávislá na sufixální skupině?"""
+    d = df[df[column].isin(["singular", "plural"])]
+    ct = pd.crosstab(d["suffix_group"], d[column]).reindex(SUFFIX_ORDER)
+    chi2, p, dof, _ = stats.chi2_contingency(ct)
+    return {"chi2": chi2, "p": p, "dof": dof, "contingency": ct}
+
+
+def chi2_unknown_suffix_test(df: pd.DataFrame, column: str = "wiki_number") -> dict:
+    """Chi² test: liší se podíl 'unknown' mezi sufixálními skupinami?
+
+    Kontrola konfundu symetrická k `chi2_unknown_land_test()` z nb10 — kdyby
+    unknown korelovalo se sufixem, mohlo by to zkreslovat i test sg/pl vs.
+    sufix (méně dat = méně jistoty zrovna v jedné skupině).
+    """
+    d = df[df[column].isin(["singular", "plural", "unknown"])].copy()
+    d["status"] = np.where(d[column] == "unknown", "unknown", "klasifikováno")
+    ct = pd.crosstab(d["suffix_group"], d["status"]).reindex(SUFFIX_ORDER)
+    chi2, p, dof, _ = stats.chi2_contingency(ct)
+    return {"chi2": chi2, "p": p, "dof": dof, "contingency": ct}
+
+
+def chi2_suffix_land_test(df: pd.DataFrame) -> dict:
+    """Chi² test: je sufixální skupina rozmístěná nezávisle na historické zemi?
+
+    Kontrola konfundu: pokud by např. -ovice bylo silně vázané na jeden
+    region, efekt sufixu z `chi2_suffix_test()` by se mohl částečně
+    překrývat s regionálním efektem z nb07/nb08.
+    """
+    d = add_land_column(df)
+    ct = pd.crosstab(d["suffix_group"], d["land"]).reindex(SUFFIX_ORDER)
+    chi2, p, dof, _ = stats.chi2_contingency(ct)
+    return {"chi2": chi2, "p": p, "dof": dof, "contingency": ct}
+
+
+def chi2_land_test_by_suffix(df: pd.DataFrame, column: str = "wiki_number") -> dict:
+    """Stratifikovaný test: přežije efekt historické země (nb07/nb08), když se
+    kontroluje na sufixální skupinu?
+
+    Pro každou sufixální skupinu zvlášť spočítá chi² sg/pl vs. land. Pokud
+    efekt země zmizí uvnitř skupin, byl z větší části jen odrazem toho, že
+    sufixální skupiny samy nejsou rovnoměrně rozmístěné (viz
+    `chi2_suffix_land_test`). `low_count_warning` upozorní, když má
+    kontingenční tabulka očekávané četnosti < 5 (chi² aproximace je pak
+    nespolehlivá — typicky u -ovice, kde je singulár extrémně vzácný).
+    """
+    d = add_land_column(df)
+    d = d[d[column].isin(["singular", "plural"])]
+    results = {}
+    for grp in SUFFIX_ORDER:
+        sub = d[d["suffix_group"] == grp]
+        ct = pd.crosstab(sub["land"], sub[column])
+        chi2, p, dof, expected = stats.chi2_contingency(ct)
+        results[grp] = {
+            "n": len(sub), "chi2": chi2, "p": p, "dof": dof, "contingency": ct,
+            "low_count_warning": bool((expected < 5).any()),
+        }
+    return results
+
+
+def plot_suffix_detail(df: pd.DataFrame, column: str = "wiki_number",
+                        min_n: int = 15, ax: plt.Axes | None = None) -> plt.Figure:
+    """Popisný (ne testovaný) graf: % plurálu pro jednotlivé 5písmenné koncovky.
+
+    Jemnější rozlišení než 3 hlavní skupiny — zajímavé pro morfologický
+    detail, ale skupiny jsou malé a početné, takže formální test by měl
+    málo síly a hodně příležitostí k falešné pozitivitě. Jen popisné.
+    """
+    set_style()
+    d = df[df[column].isin(["singular", "plural"])].copy()
+    d["end5"] = d["name"].map(suffix_ending)
+    g = d.groupby("end5")[column].agg(n="count", pct_plural=lambda s: (s == "plural").mean())
+    g = g[g["n"] >= min_n].sort_values("pct_plural")
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_WIDE)
+    else:
+        fig = ax.figure
+
+    ax.barh(g.index, g["pct_plural"], color=config.PRIMARY_COLOR)
+    for i, (end5, row) in enumerate(g.iterrows()):
+        ax.text(row["pct_plural"] + 0.01, i, f"{row['pct_plural']:.0%} (n={row['n']:.0f})",
+                va="center", fontsize=8)
+
+    ax.set_xlabel("Podíl plurálu")
+    ax.set_xlim(0, 1.15)
+    ax.set_title(f"Podíl plurálu dle koncovky (posledních 5 písmen, n ≥ {min_n})")
+    sns.despine(ax=ax, left=True)
+    fig.tight_layout()
+    return fig
