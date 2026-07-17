@@ -1048,3 +1048,127 @@ def test_population_by_label(df: pd.DataFrame, column: str = "wiki_number") -> d
     d = _population_by_label(df, column)
     groups = {c: d.loc[d[column] == c, "population_total"] for c in _LABEL_ORDER}
     return _kruskal_pairwise(groups)
+
+
+# ---------------------------------------------------------------------------
+# 11. Je unknown prostorově spojené s regiony, kde převažuje singulár?
+#     (notebook 10) — propojuje spatial segregaci z nb08 s otázkou
+#     "je unknown náhodné, nebo se kupí tam, kde je singulár?" z nb09.
+# ---------------------------------------------------------------------------
+
+def chi2_unknown_land_test(df: pd.DataFrame, column: str = "wiki_number") -> dict:
+    """Chi² test: liší se podíl 'unknown' mezi Čechy/Morava/Morava+Slezsko/Vysočina?
+
+    Rychlý, hrubozrnný test na úrovni regionu — analogie `chi2_land_test()`,
+    ale místo sg/pl testuje unknown vs. klasifikováno (sg+pl sloučené).
+    """
+    d = add_land_column(df)
+    d = d[d[column].isin(["singular", "plural", "unknown"])].copy()
+    d["status"] = np.where(d[column] == "unknown", "unknown", "klasifikováno")
+    ct = pd.crosstab(d["land"], d["status"])
+    chi2, p, dof, _ = stats.chi2_contingency(ct)
+    return {"chi2": chi2, "p": p, "dof": dof, "contingency": ct}
+
+
+def plot_unknown_share_by_land(df: pd.DataFrame, column: str = "wiki_number",
+                                ax: plt.Axes | None = None) -> plt.Figure:
+    """Bar chart: podíl obcí s labelem 'unknown' v každé historické zemi."""
+    set_style()
+    d = add_land_column(df)
+    d = d[d[column].isin(["singular", "plural", "unknown"])]
+    share = d.groupby("land")[column].apply(lambda s: (s == "unknown").mean()).sort_values()
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_SQUARE)
+    else:
+        fig = ax.figure
+
+    ax.barh(share.index, share.values, color=COLORS["unknown"])
+    for i, v in enumerate(share.values):
+        ax.text(v + 0.002, i, f"{v:.1%}", va="center", fontsize=9)
+
+    ax.set_xlabel("Podíl obcí s labelem 'unknown'")
+    ax.set_title(f"Podíl neznámých obcí dle historické země ({_SOURCE_LABELS.get(column, column)})")
+    sns.despine(ax=ax, left=True)
+    fig.tight_layout()
+    return fig
+
+
+def plural_neighbor_share(df: pd.DataFrame, column: str = "wiki_number", k: int = 6) -> pd.DataFrame:
+    """Pro každou obec: podíl plurálu mezi jejími k nejbližšími KLASIFIKOVANÝMI sousedy.
+
+    k-NN graf (`build_knn_weights`) se staví přes VŠECHNY obce (singular/
+    plural/unknown) — unknown obce musí být v grafu jako uzly, aby měly
+    vlastní skóre. Ale do samotného skóre (podílu plurálu) se počítají jen
+    sousedé s definovaným labelem (singular/plural) — unknown soused se
+    nezapočítává, jinak by skóre bylo kruhové (unknown by "vysvětlovalo"
+    unknown).
+
+    Vrací gdf se sloupci `plural_neighbor_share` (NaN, pokud obec nemá mezi
+    k nejbližšími sousedy ani jednoho klasifikovaného — řídké, ale možné na
+    okraji hustoty bodů) a `n_classified_neighbors`.
+    """
+    d = df[df[column].isin(_LABEL_ORDER)].copy()
+    gdf, w = build_knn_weights(d, k=k)
+
+    is_plural = (gdf[column] == "plural").values
+    is_classified = gdf[column].isin(["singular", "plural"]).values
+
+    shares = np.full(len(gdf), np.nan)
+    n_classified = np.zeros(len(gdf), dtype=int)
+    for i, neighbors in w.neighbors.items():
+        classified = [j for j in neighbors if is_classified[j]]
+        n_classified[i] = len(classified)
+        if classified:
+            shares[i] = np.mean(is_plural[classified])
+
+    gdf["plural_neighbor_share"] = shares
+    gdf["n_classified_neighbors"] = n_classified
+    return gdf
+
+
+def plot_neighbor_share_by_label(df_with_share: pd.DataFrame, column: str = "wiki_number",
+                                  kind: str = "box", ax: plt.Axes | None = None) -> plt.Figure:
+    """Box/violin: podíl plurálu mezi klasifikovanými sousedy, dle vlastního labelu obce.
+
+    Vstup je výstup `plural_neighbor_share()` (musí mít sloupec
+    `plural_neighbor_share`), ne syrový df.
+    """
+    set_style()
+    d = df_with_share.dropna(subset=["plural_neighbor_share"])
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_SQUARE)
+    else:
+        fig = ax.figure
+
+    palette = {c: COLORS[c] for c in _LABEL_ORDER}
+    plot_fn = sns.violinplot if kind == "violin" else sns.boxplot
+    kwargs = {"cut": 0} if kind == "violin" else {"showfliers": True, "width": 0.5}
+    plot_fn(data=d, x=column, y="plural_neighbor_share", order=_LABEL_ORDER, hue=column,
+            palette=palette, legend=False, ax=ax, **kwargs)
+
+    ns = d[column].value_counts()
+    ax.set_xticklabels([f"{_LABEL_TITLES[c]}\n(n={ns.get(c, 0)})" for c in _LABEL_ORDER])
+    ax.set_xlabel("")
+    ax.set_ylabel("Podíl plurálu mezi k nejbližšími\nklasifikovanými sousedy")
+    kind_label = "Violin" if kind == "violin" else "Box"
+    ax.set_title(f"{kind_label} plot: 'plural-sousedství' dle vlastního labelu obce")
+    sns.despine(ax=ax)
+    fig.tight_layout()
+    return fig
+
+
+def test_neighbor_share_by_label(df_with_share: pd.DataFrame, column: str = "wiki_number") -> dict:
+    """Kruskal-Wallis + párové Mann-Whitney na `plural_neighbor_share` dle labelu.
+
+    Stejná logika jako `test_population_by_label()`, jiná proměnná: místo
+    "jak velká je obec" testuje "jak moc plurálové je její okolí". Pokud je
+    skóre u unknown obcí systematicky nižší než u plurálu (a bližší
+    singuláru), jsou unknown obce prostorově vtlačené do singulárových
+    kapes — tj. `unknown` koreluje s geografií nezávisle na tom, co ukázal
+    binární chi² test na úrovni celého regionu.
+    """
+    d = df_with_share.dropna(subset=["plural_neighbor_share"])
+    groups = {c: d.loc[d[column] == c, "plural_neighbor_share"] for c in _LABEL_ORDER}
+    return _kruskal_pairwise(groups)
