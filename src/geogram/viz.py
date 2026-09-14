@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -29,16 +30,185 @@ from .morphology import SUFFIX_ORDER, SUFFIX_TITLES, suffix_ending
 # ---------------------------------------------------------------------------
 
 
-def set_style() -> None:
-    """Nastaví seaborn theme dle config.py. Volej jednou na začátku notebooku."""
+_fonts_registered = False
+
+
+def _register_fonts() -> None:
+    """Zaregistruje lokální IBM Plex .ttf (assets/fonts/) do matplotlib font manageru.
+
+    Fonty nejsou nainstalované jako OS fonty (stejně jako na webu jsou jen přes
+    Google Fonts <link>) — matplotlib je bez tohohle kroku nenajde a tiše
+    spadne na DejaVu Sans, což je přesně ten "šev" mezi grafy a zbytkem webu.
+    """
+    global _fonts_registered
+    if _fonts_registered:
+        return
+    import matplotlib.font_manager as fm
+    for path in config.FONTS_DIR.glob("*.ttf"):
+        fm.fontManager.addfont(str(path))
+    _fonts_registered = True
+
+
+_current_bg = "white"
+
+
+def set_style(bg: str | None = None) -> None:
+    """Nastaví seaborn theme + house style (fonty, mřížka, barvy) dle config.py.
+
+    Volej jednou na začátku notebooku (a je idempotentní — každá plot_* funkce
+    ji volá znovu pro sebe, aby fungovala i nezávisle na notebooku).
+
+    `bg` je "sticky": `bg=None` (výchozí) znamená "nech to, co bylo nastaveno
+    naposledy (nebo white, pokud nic)". Kdyby `bg=None` resetoval na white při
+    každém volání, `compose_poster(bg="cream")` by se hned rozbil — každá
+    plot_* funkce si totiž volá `set_style()` bez argumentů znovu pro sebe.
+    Nastav `bg="cream"`/`bg="white"` explicitně jen tam, kde se pozadí
+    skutečně rozhoduje (jednou na začátku notebooku, nebo uvnitř
+    `compose_poster()`).
+    """
+    global _current_bg
+    if bg is not None:
+        _current_bg = bg
+    bg = _current_bg
+
+    _register_fonts()
     sns.set_theme(style=config.STYLE, palette=config.PALETTE, font_scale=config.FONT_SCALE)
 
+    bg_color = config.BG_WHITE if bg == "white" else config.BG_CREAM
+    grid_color = config.GRID_ON_WHITE if bg == "white" else config.GRID_ON_CREAM
 
-def save_fig(fig: plt.Figure, filename: str, subdir: Path | None = None) -> Path:
-    """Uloží figuru jako PNG do assets/img/geogram/ (pro publikaci na webu)."""
+    plt.rcParams.update({
+        "font.family": config.FONT_SANS,
+        "text.color": config.INK_COLOR,
+        "axes.titlecolor": config.INK_COLOR,
+        "axes.labelcolor": config.INK_COLOR,
+        "xtick.color": config.MUTED_COLOR,
+        "ytick.color": config.MUTED_COLOR,
+        "xtick.labelcolor": config.MUTED_COLOR,
+        "ytick.labelcolor": config.MUTED_COLOR,
+        "grid.color": grid_color,
+        "grid.linewidth": 0.9,
+        "axes.edgecolor": grid_color,
+        "legend.frameon": False,
+        "legend.labelcolor": config.INK_COLOR,
+        "figure.facecolor": bg_color,
+        "axes.facecolor": bg_color,
+        "savefig.facecolor": bg_color,
+    })
+
+
+def _lollipop_height(n: int) -> float:
+    """Adaptivní výška horizontálního grafu podle počtu kategorií.
+
+    3 kategorie nepotřebují stejnou plochu jako 15 — bez tohohle byly krátké
+    srovnávací grafy (Čechy/Morava, 3 sufixální skupiny...) opticky stejně
+    "těžké" jako grafy s desítkami řádků.
+    """
+    return max(config.FIGSIZE_MIN_H, config.ROW_HEIGHT * n + 1.0)
+
+
+def _hlollipop(ax: plt.Axes, labels: list[str], values: list[float],
+               color: str | None = None, colors: list[str] | None = None) -> None:
+    """Lollipop varianta horizontálního bar chartu: tenká čára + tečka na konci.
+
+    Nahrazuje `ax.barh`/`sns.barplot(orient="h")` všude, kde graf nese jen
+    JEDNU hodnotu na kategorii (řazení/magnitude) — plný sloupec tam nic
+    navíc neříká, jen zabírá barevnou plochu. Pro skládané/stacked bary
+    (part-to-whole) lollipop nedává smysl, tam zůstává `ax.bar`/`ax.barh`
+    (jen tenčí, viz `config.BAR_WIDTH`).
+
+    `color` = jedna barva pro všechny položky, `colors` = barva na položku
+    (stejná délka jako labels/values) — dej právě jeden z nich.
+    """
+    y = np.arange(len(labels))
+    cols = colors if colors is not None else [color] * len(labels)
+    for yi, v, c in zip(y, values, cols):
+        ax.hlines(yi, 0, v, color=c, linewidth=config.LOLLIPOP_LW)
+        ax.plot(v, yi, "o", color=c, markersize=config.LOLLIPOP_MS, markeredgewidth=0)
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels)
+    ax.set_ylim(-0.7, len(labels) - 0.3)
+
+
+def _share_lollipop(labels: list[str], pct: np.ndarray, ns: np.ndarray,
+                     color, ax: plt.Axes | None = None, figsize: tuple | None = None,
+                     xlabel: str = "Podíl plurálu") -> plt.Figure:
+    """Sdílený lollipop pro "podíl plurálu podle skupiny" grafy.
+
+    Nahrazuje skládaný (stacked) bar chart všude, kde je skutečná informace
+    JEDNO číslo na skupinu (% plurálu) — stacked bar k tomu navíc kreslí
+    absolutní výšku, která tady nic nenese (celkový počet je vedle v textu
+    `n=`). `color` = jedna barva pro všechny, nebo seznam (barva na skupinu).
+    """
+    set_style()
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize or (6, _lollipop_height(len(labels))))
+    else:
+        fig = ax.figure
+
+    colors = color if isinstance(color, list) else [color] * len(labels)
+    _hlollipop(ax, labels, list(pct), colors=colors)
+    for i, (p, n) in enumerate(zip(pct, ns)):
+        ax.text(p + 0.02, i, f"{p:.0%}  (n={int(n)})", va="center", fontsize=9)
+
+    ax.set_xlabel(xlabel)
+    ax.set_xlim(0, 1.15)
+    sns.despine(ax=ax, left=True)
+    fig.tight_layout()
+    return fig
+
+
+def _binned_logistic(x_raw: pd.Series, y: pd.Series, ax: plt.Axes,
+                      dot_color: str | None = None, n_bins: int = 10) -> object:
+    """Fitne logistickou regresi a nakreslí ji jako binned-proportion pohled.
+
+    Nahrazuje syrový jittered scatter 0/1 bodů (ten na ploše grafu skoro nic
+    neukazuje — stovky překrývajících se bodů natlačené na dvou vodorovných
+    pruzích u y=0/1, efekt schovaný v hustotě, ne ve tvaru). Místo toho:
+    pozorovaný podíl v kvantilových binech osy x (velikost bodu ~ n v binu)
+    + fitovaná křivka s 95% pásem spolehlivosti. Stejná statistika
+    (`result`), jen čitelnější obrázek.
+
+    Vrací fitnutý `statsmodels` LogitResults (stejné rozhraní jako předtím).
+    """
+    import statsmodels.api as sm
+
+    X = sm.add_constant(x_raw)
+    result = sm.Logit(y, X).fit(disp=False)
+
+    dot_color = dot_color or config.PRIMARY_COLOR
+    n_bins = min(n_bins, x_raw.nunique())
+    bins = pd.qcut(x_raw, n_bins, duplicates="drop")
+    binned = (
+        pd.DataFrame({"x": x_raw.values, "y": y.values})
+        .groupby(bins.values, observed=True)
+        .agg(x_mean=("x", "mean"), y_mean=("y", "mean"), n=("y", "size"))
+    )
+    sizes = 18 + 90 * (binned["n"] / binned["n"].max())
+    ax.scatter(binned["x_mean"], binned["y_mean"], s=sizes, color=dot_color,
+               alpha=0.9, linewidths=0, zorder=3, label="Pozorovaný podíl (bin)")
+
+    x_line = np.linspace(x_raw.min(), x_raw.max(), 200)
+    pred = result.get_prediction(sm.add_constant(x_line)).summary_frame(alpha=0.05)
+    ax.fill_between(x_line, pred["ci_lower"], pred["ci_upper"],
+                     color=dot_color, alpha=0.15, linewidth=0, label="95% CI")
+    ax.plot(x_line, pred["predicted"], color=config.INK_COLOR, lw=2, label="Logistická regrese")
+    ax.set_ylim(-0.03, 1.03)
+    return result
+
+
+def save_fig(fig: plt.Figure, filename: str, subdir: Path | None = None, fmt: str = "svg") -> Path:
+    """Uloží figuru do assets/img/geogram/ (pro publikaci na webu).
+
+    Výchozí formát je SVG — vektor, ostrý na jakémkoli zoomu/DPI, na rozdíl
+    od PNG nikdy nerozostří text oproti okolnímu HTML. Použij `fmt="png"`
+    jen pro grafy s tisíci překrývajících se bodů (např. LISA mapa) — tam by
+    SVG kreslilo každý bod jako samostatný element a zbytečně nafouklo
+    velikost souboru.
+    """
     target_dir = subdir or config.ASSETS_IMG_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
-    path = target_dir / f"{filename}.png"
+    path = target_dir / f"{filename}.{fmt}"
     fig.savefig(path, dpi=config.DPI_SAVE, bbox_inches="tight")
     return path
 
@@ -111,12 +281,40 @@ def add_land_column(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# Binární Čechy/Morava rozdělení pro `plot_land_binary()` — na rozdíl od
+# `add_land_column()` (celé kraje) rozpouští kraj Vysočina podle OKRESU na
+# historickou zemskou hranici, ne podle správního kraje. Zlínský i
+# Moravskoslezský kraj počítají jako Morava (slezská část se sem pro
+# dvouskupinové srovnání slučuje).
+_LAND_BINARY_MAP = {
+    "Středočeský kraj": "Čechy", "Jihočeský kraj": "Čechy", "Plzeňský kraj": "Čechy",
+    "Karlovarský kraj": "Čechy", "Ústecký kraj": "Čechy", "Liberecký kraj": "Čechy",
+    "Královéhradecký kraj": "Čechy", "Pardubický kraj": "Čechy",
+    "Jihomoravský kraj": "Morava", "Olomoucký kraj": "Morava",
+    "Zlínský kraj": "Morava", "Moravskoslezský kraj": "Morava",
+}
+_VYSOCINA_DISTRICTS_CECHY = {"Havlíčkův Brod", "Pelhřimov"}
+
+
+def add_land_column_binary(df: pd.DataFrame) -> pd.DataFrame:
+    """Add a 'land_binary' column (Čechy / Morava), s Vysočinou rozpuštěnou
+    podle okresu (Havlíčkobrodsko a Pelhřimovsko → Čechy, zbytek → Morava) —
+    přesnější aproximace historické zemské hranice než celý kraj najednou.
+    """
+    out = df.copy()
+    land = out["region_name"].map(_LAND_BINARY_MAP)
+    is_vysocina = out["region_name"] == "Kraj Vysočina"
+    land = land.where(~is_vysocina, out["district_name"].isin(_VYSOCINA_DISTRICTS_CECHY).map({True: "Čechy", False: "Morava"}))
+    out["land_binary"] = land.fillna("Neznámý")
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 1. Overview: distribuce sg/pl/unknown
 # ---------------------------------------------------------------------------
 
 def plot_overview(df: pd.DataFrame, column: str = "wiki_number", ax: plt.Axes | None = None) -> plt.Figure:
-    """Horizontal bar chart with absolute counts and percentages.
+    """Lollipop chart (tenká čára + tečka) s absolutními počty a procenty.
 
     column: "wiki_number" (default) nebo "ujc_number" — obě mají stejnou
     sadu kategorií (singular/plural/both/unknown/not_found/error).
@@ -128,24 +326,75 @@ def plot_overview(df: pd.DataFrame, column: str = "wiki_number", ax: plt.Axes | 
               "unknown": "Neznámé", "not_found": "Nenalezeno", "error": "Chyba"}
 
     if ax is None:
-        fig, ax = plt.subplots(figsize=(8, 3))
+        fig, ax = plt.subplots(figsize=(8, _lollipop_height(len(order))))
     else:
         fig = ax.figure
 
     total = len(df)
-    palette = [COLORS.get(c, config.NEUTRAL_COLOR) for c in order]
-    sns.barplot(
-        x=[counts[c] for c in order],
-        y=[labels.get(c, c) for c in order],
-        palette=palette, orient="h", ax=ax,
-    )
+    values = [counts[c] for c in order]
+    colors = [COLORS.get(c, config.NEUTRAL_COLOR) for c in order]
+    _hlollipop(ax, [labels.get(c, c) for c in order], values, colors=colors)
     for i, c in enumerate(order):
         n = counts[c]
-        ax.text(n + 15, i, f"{n} ({n/total:.1%})", va="center", fontsize=9)
+        ax.text(n + max(values) * 0.02, i, f"{n} ({n/total:.1%})", va="center", fontsize=9)
 
     ax.set_xlabel("Počet obcí")
-    ax.set_title(f"Distribuce gramatického čísla obcí -ice\n(zdroj: {_SOURCE_LABELS.get(column, column)})")
     ax.set_xlim(0, max(counts) * 1.20)
+    sns.despine(ax=ax, left=True)
+    fig.tight_layout()
+    return fig
+
+
+_REGION_TOTAL_CATS = ["plural", "singular", "unknown"]
+_REGION_TOTAL_LABELS = {"plural": "Plurál", "singular": "Singulár", "unknown": "Neznámé"}
+_REGION_TOTAL_TEXT_COLOR = {"plural": "white", "singular": None, "unknown": None}  # None → config.INK_COLOR
+
+
+def plot_region_totals(df: pd.DataFrame, column: str = "wiki_number", ax: plt.Axes | None = None) -> plt.Figure:
+    """Stacked bar: rozklad plurál/singulár/neznámé podle kraje, seřazeno
+    sestupně podle celkového počtu -ice obcí.
+
+    Na rozdíl od `plot_by_region()` (jen sg/pl, řazeno podle % plurálu — jiná
+    otázka) tenhle graf odpovídá na "kde je -ice obcí nejvíc" a záměrně
+    zahrnuje i "neznámé" — tady jde o objem dat, ne o gramatické číslo, takže
+    není důvod tu kategorii schovávat. Číslo v segmentu se píše, jen když je
+    segment dost široký, aby se do něj vešlo čitelně; celkový součet je vždy
+    u konce sloupce.
+    """
+    set_style()
+    pivot = df.groupby(["region_name", column]).size().unstack(fill_value=0)
+    for c in _REGION_TOTAL_CATS:
+        if c not in pivot.columns:
+            pivot[c] = 0
+    pivot["total"] = pivot[_REGION_TOTAL_CATS].sum(axis=1)
+    pivot = pivot.sort_values("total")  # ascending: barh kreslí první položku dole → největší nahoře
+    short = [_REGION_SHORT.get(r, r) for r in pivot.index]
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, _lollipop_height(len(pivot))))
+    else:
+        fig = ax.figure
+
+    bottom = np.zeros(len(pivot))
+    min_label_width = pivot["total"].max() * 0.05
+    for cat in _REGION_TOTAL_CATS:
+        vals = pivot[cat].values
+        ax.barh(short, vals, left=bottom, color=COLORS[cat], label=_REGION_TOTAL_LABELS[cat],
+                 height=config.BAR_WIDTH)
+        text_color = _REGION_TOTAL_TEXT_COLOR[cat] or config.INK_COLOR
+        for i, v in enumerate(vals):
+            if v >= min_label_width:
+                ax.text(bottom[i] + v / 2, i, str(int(v)), ha="center", va="center",
+                         fontsize=7.5, color=text_color)
+        bottom += vals
+
+    for i, total in enumerate(pivot["total"].values):
+        ax.text(total + pivot["total"].max() * 0.02, i, str(int(total)),
+                 va="center", fontsize=9, fontweight="600")
+
+    ax.set_xlabel("Počet obcí -ice")
+    ax.set_xlim(0, pivot["total"].max() * 1.15)
+    ax.legend(frameon=False, loc="lower right")
     sns.despine(ax=ax, left=True)
     fig.tight_layout()
     return fig
@@ -170,14 +419,14 @@ def plot_by_region(df: pd.DataFrame, column: str = "wiki_number", ax: plt.Axes |
     short = [_REGION_SHORT.get(r, r) for r in pivot.index]
 
     if ax is None:
-        fig, ax = plt.subplots(figsize=config.FIGSIZE_WIDE)
+        fig, ax = plt.subplots(figsize=(config.FIGSIZE_WIDE[0], _lollipop_height(len(pivot))))
     else:
         fig = ax.figure
 
     bottom = np.zeros(len(pivot))
     for cat, label in [("plural", "Plurál"), ("singular", "Singulár")]:
         vals = pivot.get(cat, pd.Series(0, index=pivot.index)).values
-        ax.barh(short, vals, left=bottom, label=label, color=COLORS[cat])
+        ax.barh(short, vals, left=bottom, label=label, color=COLORS[cat], height=config.BAR_WIDTH)
         bottom += vals
 
     # % label on each bar
@@ -186,8 +435,6 @@ def plot_by_region(df: pd.DataFrame, column: str = "wiki_number", ax: plt.Axes |
                 va="center", fontsize=8, color="#444")
 
     ax.set_xlabel("Počet obcí")
-    ax.set_title(f"Singulár vs. plurál dle kraje ({_SOURCE_LABELS.get(column, column)})\n"
-                 "(seřazeno vzestupně dle podílu plurálu)")
     ax.legend(loc="lower right", frameon=False)
     ax.invert_yaxis()
     sns.despine(ax=ax, left=True, bottom=False)
@@ -200,40 +447,34 @@ def plot_by_region(df: pd.DataFrame, column: str = "wiki_number", ax: plt.Axes |
 # ---------------------------------------------------------------------------
 
 def plot_by_land(df: pd.DataFrame, column: str = "wiki_number", ax: plt.Axes | None = None) -> plt.Figure:
-    """Stacked bar: sg vs. pl pro Čechy / Morava+Slezsko / Vysočina."""
-    set_style()
+    """Lollipop: podíl plurálu pro Čechy / Morava+Slezsko / Vysočina, seřazeno."""
     d = add_land_column(df)
     d = d[d[column].isin(["singular", "plural"])]
-    pivot = (
-        d.groupby(["land", column])
-        .size()
-        .unstack(fill_value=0)
-    )
+    pivot = d.groupby(["land", column]).size().unstack(fill_value=0)
     pivot["total"] = pivot.sum(axis=1)
     pivot["pct_pl"] = pivot.get("plural", 0) / pivot["total"]
     pivot = pivot.sort_values("pct_pl")
 
-    if ax is None:
-        fig, ax = plt.subplots(figsize=config.FIGSIZE_SQUARE)
-    else:
-        fig = ax.figure
+    return _share_lollipop(list(pivot.index), pivot["pct_pl"].values, pivot["total"].values,
+                            config.PRIMARY_COLOR, ax=ax, figsize=(6, _lollipop_height(len(pivot))))
 
-    bottom = np.zeros(len(pivot))
-    for cat, label in [("plural", "Plurál"), ("singular", "Singulár")]:
-        vals = pivot.get(cat, pd.Series(0, index=pivot.index)).values
-        ax.bar(pivot.index, vals, bottom=bottom, label=label, color=COLORS[cat])
-        bottom += vals
 
-    for i, (_, row) in enumerate(pivot.iterrows()):
-        ax.text(i, row["total"] + 5, f"{row['pct_pl']:.0%}",
-                ha="center", fontsize=10, fontweight="bold", color="#222")
+def plot_land_binary(df: pd.DataFrame, column: str = "wiki_number", ax: plt.Axes | None = None) -> plt.Figure:
+    """Lollipop: podíl plurálu Čechy vs. Morava (binární historická hranice).
 
-    ax.set_ylabel("Počet obcí")
-    ax.set_title(f"Singulár vs. plurál ({_SOURCE_LABELS.get(column, column)})\ndle historické země")
-    ax.legend(frameon=False)
-    sns.despine(ax=ax)
-    fig.tight_layout()
-    return fig
+    Na rozdíl od `plot_by_land()` (4 skupiny podle celých krajů) je tu kraj
+    Vysočina rozpuštěný podle okresu na skutečnou zemskou hranici — viz
+    `add_land_column_binary()`.
+    """
+    d = add_land_column_binary(df)
+    d = d[d[column].isin(["singular", "plural"])]
+    pivot = d.groupby(["land_binary", column]).size().unstack(fill_value=0)
+    pivot["total"] = pivot.sum(axis=1)
+    pivot["pct_pl"] = pivot.get("plural", 0) / pivot["total"]
+    pivot = pivot.sort_values("pct_pl")
+
+    return _share_lollipop(list(pivot.index), pivot["pct_pl"].values, pivot["total"].values,
+                            config.PRIMARY_COLOR, ax=ax, figsize=(6, _lollipop_height(len(pivot))))
 
 
 # ---------------------------------------------------------------------------
@@ -246,51 +487,27 @@ def plot_population_logistic(
     ax: plt.Axes | None = None,
     log_scale: bool = True,
 ) -> tuple[plt.Figure, object]:
-    """Scatter y=0/1 (sg/pl) × populace + logistická regresní křivka.
+    """Binned-proportion pohled na logistickou regresi populace → sg/pl.
 
     Returns (fig, statsmodels LogitResults).
     """
     set_style()
-    import statsmodels.api as sm
-
     d = df[df[column].isin(["singular", "plural"])].dropna(subset=["population_total"])
     d = d[d["population_total"] > 0].copy()
     d["y"] = (d[column] == "plural").astype(int)
-
     x_raw = np.log10(d["population_total"]) if log_scale else d["population_total"]
-    X = sm.add_constant(x_raw)
-    result = sm.Logit(d["y"], X).fit(disp=False)
 
     if ax is None:
         fig, ax = plt.subplots(figsize=config.FIGSIZE_DEFAULT)
     else:
         fig = ax.figure
 
-    rng = np.random.default_rng(42)
-    jitter = rng.uniform(-0.03, 0.03, size=len(d))
-    for cat in ["singular", "plural"]:
-        mask = d[column] == cat
-        ax.scatter(
-            x_raw[mask], d["y"][mask] + jitter[mask],
-            color=COLORS[cat], alpha=0.20, s=9, linewidths=0,
-            label=cat.capitalize(),
-        )
-
-    x_line = np.linspace(x_raw.min(), x_raw.max(), 300)
-    X_line = sm.add_constant(x_line)
-    ax.plot(x_line, result.predict(X_line), color="#222", lw=2.2, label="Logistická regrese")
+    result = _binned_logistic(x_raw, d["y"], ax, dot_color=config.PRIMARY_COLOR)
 
     ax.set_xlabel("log₁₀(počet obyvatel)" if log_scale else "Počet obyvatel")
-    ax.set_ylabel("Gramatické číslo")
-    ax.set_yticks([0, 1])
-    ax.set_yticklabels(["Singulár", "Plurál"])
-
-    coef = result.params.iloc[1]
-    pval = result.pvalues.iloc[1]
-    ax.set_title(f"Logistická regrese ({_SOURCE_LABELS.get(column, column)}): populace → sg/pl\n"
-                 f"β = {coef:.3f}, p = {pval:.2e}")
-    ax.legend(frameon=False)
-    sns.despine(ax=ax)
+    ax.set_ylabel("Podíl plurálu")
+    ax.legend(frameon=False, loc="lower right")
+    sns.despine(ax=ax, left=True)
     fig.tight_layout()
     return fig, result
 
@@ -326,7 +543,6 @@ def plot_population_violin(
     ax.set_xticklabels(["Singulár", "Plurál"])
     ax.set_xlabel("")
     ax.set_ylabel(ylabel)
-    ax.set_title(f"Distribuce populace ({_SOURCE_LABELS.get(column, column)}): singulár vs. plurál")
 
     for i, cat in enumerate(order):
         med = d.loc[d[column] == cat, "pop_plot"].median()
@@ -334,7 +550,7 @@ def plot_population_violin(
         label = f"n={n}\nmed={10**med:,.0f}" if log_scale else f"n={n}"
         ax.text(i, ax.get_ylim()[1] * 0.99, label, ha="center", va="top", fontsize=8)
 
-    sns.despine(ax=ax)
+    sns.despine(ax=ax, left=True)
     fig.tight_layout()
     return fig
 
@@ -366,9 +582,8 @@ def plot_missing_analysis(df: pd.DataFrame, column: str = "wiki_number", ax: plt
 
     ax.set_xlabel("Počet obyvatel (log škála)")
     ax.set_ylabel("Hustota")
-    ax.set_title(f"Velikost obcí ({_SOURCE_LABELS.get(column, column)}): klasifikované vs. nerozpoznané")
     ax.legend(frameon=False)
-    sns.despine(ax=ax)
+    sns.despine(ax=ax, left=True)
     fig.tight_layout()
     return fig
 
@@ -450,22 +665,18 @@ def plot_agreement_summary(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.
     total = len(df)
 
     if ax is None:
-        fig, ax = plt.subplots(figsize=config.FIGSIZE_DEFAULT)
+        fig, ax = plt.subplots(figsize=(8, _lollipop_height(len(order))))
     else:
         fig = ax.figure
 
-    palette = [COLORS[c] for c in order]
-    sns.barplot(
-        x=[counts[c] for c in order],
-        y=[_AGREE_LABELS[c] for c in order],
-        palette=palette, orient="h", ax=ax,
-    )
+    values = [counts[c] for c in order]
+    colors = [COLORS[c] for c in order]
+    _hlollipop(ax, [_AGREE_LABELS[c] for c in order], values, colors=colors)
     for i, c in enumerate(order):
         n = counts[c]
-        ax.text(n + 5, i, f"{n} ({n/total:.1%})", va="center", fontsize=9)
+        ax.text(n + max(values) * 0.02, i, f"{n} ({n/total:.1%})", va="center", fontsize=9)
 
     ax.set_xlabel("Počet obcí")
-    ax.set_title("Shoda Wikipedia vs. IJP ÚJČ")
     ax.set_xlim(0, max(counts) * 1.22)
     sns.despine(ax=ax, left=True)
     fig.tight_layout()
@@ -494,7 +705,6 @@ def plot_agreement_heatmap(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.
         ct, annot=True, fmt="d", cmap="Blues",
         linewidths=0.5, ax=ax, cbar_kws={"label": "Počet obcí"},
     )
-    ax.set_title("Matice záměn: Wikipedia vs. IJP ÚJČ\n(jen klasifikované v obou)")
     fig.tight_layout()
     return fig
 
@@ -517,7 +727,7 @@ def plot_agreement_by_region(df: pd.DataFrame, ax: plt.Axes | None = None) -> pl
     short = [_REGION_SHORT.get(r, r) for r in pivot.index]
 
     if ax is None:
-        fig, ax = plt.subplots(figsize=(config.FIGSIZE_WIDE[0], 5.5))
+        fig, ax = plt.subplots(figsize=(config.FIGSIZE_WIDE[0], _lollipop_height(len(pivot))))
     else:
         fig = ax.figure
 
@@ -525,13 +735,12 @@ def plot_agreement_by_region(df: pd.DataFrame, ax: plt.Axes | None = None) -> pl
     patches = []
     for cat in order_cols:
         vals = pivot[cat].values
-        ax.barh(short, vals, left=bottom, color=COLORS[cat], label=_AGREE_LABELS[cat])
+        ax.barh(short, vals, left=bottom, color=COLORS[cat], label=_AGREE_LABELS[cat], height=config.BAR_WIDTH)
         patches.append(mpatches.Patch(color=COLORS[cat], label=_AGREE_LABELS[cat]))
         bottom += vals
 
     ax.set_xlabel("Počet obcí")
-    ax.set_title("Shoda Wikipedia vs. IJP ÚJČ dle kraje")
-    ax.legend(handles=patches, loc="lower right", fontsize=8)
+    ax.legend(handles=patches, loc="lower right", fontsize=8, frameon=False)
     ax.invert_yaxis()
     sns.despine(ax=ax, left=True)
     fig.tight_layout()
@@ -545,8 +754,10 @@ def plot_mismatch_details(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.F
         df = classify_agreement(df)
 
     mis = df[df["agreement"] == "mismatch"].copy()
+    label_all = mis["wiki_number"] + " → " + mis["ujc_number"] if not mis.empty else pd.Series(dtype=str)
+    n_rows = label_all.nunique() if not mis.empty else 1
     if ax is None:
-        fig, ax = plt.subplots(figsize=config.FIGSIZE_DEFAULT if not mis.empty else (6, 3))
+        fig, ax = plt.subplots(figsize=(8, _lollipop_height(n_rows)) if not mis.empty else (6, 3))
     else:
         fig = ax.figure
 
@@ -554,12 +765,9 @@ def plot_mismatch_details(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.F
         ax.text(0.5, 0.5, "Žádné neshody", ha="center", va="center", transform=ax.transAxes)
         return fig
 
-    label = mis["wiki_number"] + " → " + mis["ujc_number"]
-    counts = label.value_counts()
-
-    sns.barplot(x=counts.values, y=counts.index, color=COLORS["mismatch"], ax=ax)
+    counts = label_all.value_counts()
+    _hlollipop(ax, list(counts.index), list(counts.values), color=COLORS["mismatch"])
     ax.set_xlabel("Počet obcí")
-    ax.set_title(f"Neshody Wikipedia → IJP (n={len(mis)})")
     sns.despine(ax=ax, left=True)
     fig.tight_layout()
     return fig
@@ -575,14 +783,42 @@ def plot_mismatch_details(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.F
 # Řešení je vizuální kódování místo další barvy: singulár dostává tmavou,
 # maximálně kontrastní "neutrální" barvu; neznámé/nenalezené je prázdný kroužek
 # (bez výplně) — čte se jako "chybí data", běžná mapová konvence.
+#   radius/fill_opacity zmenšeny a stroke je bílý (ne stejná barva jako
+#   výplň) — na 1806 bodech na mapě celé ČR se hustě obydlené oblasti jinak
+#   slily do neprůhledných modrých/tmavých "kaněk" bez rozlišitelných
+#   jednotlivých bodů. Bílý 0.5px obrys dá i slepeným bodům viditelnou
+#   hranici, nižší opacity necha proscvítat překryv (víc bodů na místě =
+#   o trochu tmavší skvrna, ne rovnou plná barva).
 _MAP_STYLE = {
-    "plural":    {"color": config.PRIMARY_COLOR,          "radius": 4, "fill": True,  "fill_opacity": 0.80, "weight": 1},
-    "singular":  {"color": config.CATEGORICAL_PALETTE[2], "radius": 4, "fill": True,  "fill_opacity": 0.85, "weight": 1},
-    "both":      {"color": config.CATEGORICAL_PALETTE[2], "radius": 4, "fill": True,  "fill_opacity": 0.85, "weight": 1},
+    "plural":    {"color": config.PRIMARY_COLOR,          "radius": 3, "fill": True,  "fill_opacity": 0.65, "weight": 0.5, "stroke_color": "#ffffff"},
+    "singular":  {"color": config.CATEGORICAL_PALETTE[2], "radius": 3, "fill": True,  "fill_opacity": 0.70, "weight": 0.5, "stroke_color": "#ffffff"},
+    "both":      {"color": config.CATEGORICAL_PALETTE[2], "radius": 3, "fill": True,  "fill_opacity": 0.70, "weight": 0.5, "stroke_color": "#ffffff"},
 }
 _MAP_STYLE_DEFAULT = {
-    "color": config.NEUTRAL_COLOR, "radius": 3, "fill": False, "fill_opacity": 0.0, "weight": 1.5,
+    "color": config.NEUTRAL_COLOR, "radius": 3, "fill": False, "fill_opacity": 0.0, "weight": 1.2, "stroke_color": config.NEUTRAL_COLOR,
 }
+
+# Overrides Leaflet's own chrome to match styles.css: no shadows, no rounded
+# corners, thin 1px "--rule"-colored borders, IBM Plex everywhere text
+# appears (popups, zoom control, attribution) instead of the browser default.
+_MAP_CSS = """
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  .leaflet-container { font-family: 'IBM Plex Sans', Arial, sans-serif; }
+  .leaflet-popup-content-wrapper { border-radius: 0; box-shadow: none; border: 1px solid #d8d6ce; }
+  .leaflet-popup-content { font-family: 'IBM Plex Sans', Arial, sans-serif; font-size: 13px; color: #14171a; margin: .7em .9em; line-height: 1.5; }
+  .leaflet-popup-content b { font-weight: 600; }
+  .leaflet-popup-tip-container { display: none; }
+  .leaflet-bar { border-radius: 0; box-shadow: none; border: 1px solid #d8d6ce; }
+  .leaflet-bar a { border-radius: 0 !important; font-family: 'IBM Plex Mono', monospace; color: #14171a; background-color: #ffffff; }
+  .leaflet-bar a:hover { background-color: #f5f4f0; color: #c1440e; }
+  .leaflet-control-attribution { font-family: 'IBM Plex Mono', monospace; font-size: 10px; background: rgba(255,255,255,.85); border-top: 1px solid #d8d6ce; padding: 0 .4em; }
+  .leaflet-container a { color: #c1440e; }
+  .leaflet-container a:hover { color: #c1440e; text-decoration: underline; }
+</style>
+"""
 
 
 def plot_map_folium(df: pd.DataFrame, lat_col: str = "latitude", lon_col: str = "longitude"):
@@ -598,24 +834,45 @@ def plot_map_folium(df: pd.DataFrame, lat_col: str = "latitude", lon_col: str = 
     import folium
 
     d = df.dropna(subset=[lat_col, lon_col])
-    m = folium.Map(location=[49.8, 15.5], zoom_start=7, tiles="CartoDB positron")
+    # "CartoDB positron" (folium's built-in preset) now renders a big
+    # "API KEY REQUIRED" watermark over the whole map — Carto restricted
+    # anonymous access to their basemap tiles. Esri's World Light Gray Canvas
+    # is the closest free, no-key equivalent (same "trivially clean
+    # cartography" look — neutral light gray land, no satellite/terrain).
+    m = folium.Map(
+        location=[49.8, 15.5], zoom_start=7,
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+        attr="Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ",
+    )
+
+    # Leaflet's own chrome (popups, zoom buttons, attribution) is a separate
+    # standalone HTML document loaded in an <iframe> — it doesn't inherit the
+    # parent page's <link> or CSS, so it needs its own font import and its
+    # own override of Leaflet's defaults (rounded corners + drop shadows,
+    # both against this site's "no shadows, no rounded corners, thin 1px
+    # lines" rule) to actually look like part of michaltobiasdobes.cz.
+    m.get_root().header.add_child(folium.Element(_MAP_CSS))
 
     for _, row in d.iterrows():
         wiki_number = row.get("wiki_number", "unknown")
         style = _MAP_STYLE.get(wiki_number, _MAP_STYLE_DEFAULT)
         folium.CircleMarker(
             location=[row[lat_col], row[lon_col]],
-            radius=style["radius"], color=style["color"], weight=style["weight"],
+            radius=style["radius"], color=style["stroke_color"], weight=style["weight"],
             fill=style["fill"], fill_color=style["color"], fill_opacity=style["fill_opacity"],
             popup=(f"<b>{row.get('name','')}</b><br>"
                    f"{wiki_number} | {int(row.get('population_total',0))} obyv."),
         ).add_to(m)
 
+    # Styl legendy sladěný s designem michaltobiasdobes.cz: bílé pozadí, tenká
+    # 1px linka (žádný stín, žádné zaoblené rohy), IBM Plex Sans/Mono — mono
+    # verzálky pro popisek, sans pro kategorie (viz styles.css .section-label / .tag).
     legend = f"""
-    <div style="position:fixed;bottom:30px;left:30px;z-index:999;background:white;
-                padding:10px 14px;border:1px solid #ccc;border-radius:6px;font-size:13px;
-                box-shadow:2px 2px 6px rgba(0,0,0,0.15)">
-      <b>Gramatické číslo</b><br>
+    <div style="position:fixed;bottom:30px;left:30px;z-index:999;background:#ffffff;
+                padding:.7em 1em;border:1px solid #d8d6ce;font-size:13px;
+                font-family:'IBM Plex Sans',Arial,sans-serif;color:#14171a;line-height:1.6;">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.04em;
+                  text-transform:uppercase;color:#6b6a63;margin-bottom:.35em;">Gramatické číslo</div>
       <span style="color:{_MAP_STYLE['plural']['color']};">&#9679;</span> Plurál<br>
       <span style="color:{_MAP_STYLE['singular']['color']};">&#9679;</span> Singulár<br>
       <span style="color:{_MAP_STYLE_DEFAULT['color']};">&#9675;</span> Neznámé
@@ -729,9 +986,8 @@ def plot_moran_scatter(moran_result, ax: plt.Axes | None = None) -> plt.Figure:
     ax.axvline(0, color="#999", lw=0.8)
     ax.set_xlabel("Label obce (centrovaný, 1=plurál/0=singulár)")
     ax.set_ylabel("Prostorově zpožděný průměr sousedů")
-    ax.set_title(f"Moran scatterplot (p_sim = {moran_result.p_sim:.4f}, {moran_result.permutations} permutací)")
     ax.legend(frameon=False)
-    sns.despine(ax=ax)
+    sns.despine(ax=ax, left=True)
     fig.tight_layout()
     return fig
 
@@ -758,7 +1014,8 @@ def moran_local_test(df: pd.DataFrame, column: str = "wiki_number",
     return gdf, ml
 
 
-def plot_lisa_map(gdf: pd.DataFrame, alpha: float = 0.05, ax: plt.Axes | None = None) -> plt.Figure:
+def plot_lisa_map(gdf: pd.DataFrame, alpha: float = 0.05, boundary=None,
+                   ax: plt.Axes | None = None) -> plt.Figure:
     """Mapa significantních LISA shluků (výstup `moran_local_test`).
 
     HH (plurál obklopený plurálem) a LL (singulár obklopený singulárem) jsou
@@ -766,6 +1023,12 @@ def plot_lisa_map(gdf: pd.DataFrame, alpha: float = 0.05, ax: plt.Axes | None = 
     než sousedi) jsou prostorové anomálie — ACCENT, stejná sémantika jako
     jinde v projektu (skutečná neshoda/výjimka, ne jen odlišení). Body s
     p >= alpha (nevýznamné) jsou tenké šedé tečky v pozadí.
+
+    `boundary`: volitelný `geopandas.GeoDataFrame` s hranicí ČR
+    (`data.load_cz_boundary()`) — vykreslí se jako tenká hairline POD body
+    (žádná výplň/barva země, viz STYLE_GUIDE.md §7 "trivially clean" mapy),
+    ať je jasné, kde končí republika a kde je jen okraj shluku dat. Reprojektuje
+    se automaticky do CRS `gdf` (EPSG:5514), pokud ještě není.
     """
     set_style()
     _LISA_LABELS = {1: "HH (plurál shluk)", 2: "LH (anomálie)", 3: "LL (singulár shluk)", 4: "HL (anomálie)"}
@@ -777,18 +1040,21 @@ def plot_lisa_map(gdf: pd.DataFrame, alpha: float = 0.05, ax: plt.Axes | None = 
     else:
         fig = ax.figure
 
+    if boundary is not None:
+        b = boundary if boundary.crs == gdf.crs else boundary.to_crs(gdf.crs)
+        b.boundary.plot(ax=ax, color=config.MUTED_COLOR, linewidth=0.8, alpha=0.6, zorder=1)
+
     sig = gdf[gdf["lisa_p"] < alpha]
     nonsig = gdf[gdf["lisa_p"] >= alpha]
 
     ax.scatter(nonsig.geometry.x, nonsig.geometry.y, color="#ccc", s=6, alpha=0.4, linewidths=0,
-               label=f"Nevýznamné (p ≥ {alpha})")
+               zorder=2, label=f"Nevýznamné (p ≥ {alpha})")
     for q, label in _LISA_LABELS.items():
         m = sig[sig["lisa_q"] == q]
         if len(m):
             ax.scatter(m.geometry.x, m.geometry.y, color=_LISA_COLORS[q], s=22, alpha=0.85,
-                       linewidths=0, label=f"{label} (n={len(m)})")
+                       linewidths=0, zorder=3, label=f"{label} (n={len(m)})")
 
-    ax.set_title(f"LISA — lokální shluky sg/pl (p < {alpha})")
     ax.set_xticks([])
     ax.set_yticks([])
     ax.legend(frameon=False, fontsize=8, loc="upper left")
@@ -844,46 +1110,24 @@ def test_unknown_population(df: pd.DataFrame, column: str = "wiki_number") -> di
 
 def plot_unknown_population_logistic(df: pd.DataFrame, column: str = "wiki_number",
                                       ax: plt.Axes | None = None) -> tuple[plt.Figure, object]:
-    """Scatter y=0/1 (klasifikováno/unknown) × log populace + logistická regresní křivka."""
+    """Binned-proportion pohled na logistickou regresi populace → 'unknown' label."""
     set_style()
-    import statsmodels.api as sm
-
     d = df[df[column].isin(["singular", "plural", "unknown"])].dropna(subset=["population_total"])
     d = d[d["population_total"] > 0].copy()
     d["is_unknown"] = (d[column] == "unknown").astype(int)
-
     x_raw = np.log10(d["population_total"])
-    X = sm.add_constant(x_raw)
-    result = sm.Logit(d["is_unknown"], X).fit(disp=False)
 
     if ax is None:
         fig, ax = plt.subplots(figsize=config.FIGSIZE_DEFAULT)
     else:
         fig = ax.figure
 
-    rng = np.random.default_rng(42)
-    jitter = rng.uniform(-0.03, 0.03, size=len(d))
-    labels = {0: ("Klasifikováno", config.PRIMARY_COLOR), 1: ("Neznámé", COLORS["unknown"])}
-    for val, (label, color) in labels.items():
-        mask = d["is_unknown"] == val
-        ax.scatter(x_raw[mask], d["is_unknown"][mask] + jitter[mask],
-                    color=color, alpha=0.20, s=9, linewidths=0, label=label)
-
-    x_line = np.linspace(x_raw.min(), x_raw.max(), 300)
-    X_line = sm.add_constant(x_line)
-    ax.plot(x_line, result.predict(X_line), color="#222", lw=2.2, label="Logistická regrese")
+    result = _binned_logistic(x_raw, d["is_unknown"], ax, dot_color=COLORS["unknown"])
 
     ax.set_xlabel("log₁₀(počet obyvatel)")
-    ax.set_ylabel("")
-    ax.set_yticks([0, 1])
-    ax.set_yticklabels(["Klasifikováno", "Neznámé"])
-
-    coef = result.params.iloc[1]
-    pval = result.pvalues.iloc[1]
-    ax.set_title(f"Logistická regrese ({_SOURCE_LABELS.get(column, column)}): populace → neznámý label\n"
-                 f"β = {coef:.3f}, OR (na 10× populaci) = {np.exp(coef):.3f}, p = {pval:.2e}")
-    ax.legend(frameon=False)
-    sns.despine(ax=ax)
+    ax.set_ylabel("Podíl s labelem 'unknown'")
+    ax.legend(frameon=False, loc="upper right")
+    sns.despine(ax=ax, left=True)
     fig.tight_layout()
     return fig, result
 
@@ -936,8 +1180,7 @@ def plot_population_by_label(df: pd.DataFrame, column: str = "wiki_number",
     ax.set_xlabel("")
     ax.set_ylabel("log₁₀(počet obyvatel)")
     kind_label = "Violin" if kind == "violin" else "Box"
-    ax.set_title(f"{kind_label} plot: populace dle labelu ({_SOURCE_LABELS.get(column, column)})")
-    sns.despine(ax=ax)
+    sns.despine(ax=ax, left=True)
     fig.tight_layout()
     return fig
 
@@ -968,9 +1211,8 @@ def plot_population_density_by_label(df: pd.DataFrame, column: str = "wiki_numbe
 
     ax.set_xlabel("log₁₀(počet obyvatel)  (čárkovaně: mediány)")
     ax.set_ylabel("Hustota")
-    ax.set_title(f"Rozdělení populace dle labelu ({_SOURCE_LABELS.get(column, column)})")
     ax.legend(frameon=False)
-    sns.despine(ax=ax)
+    sns.despine(ax=ax, left=True)
     fig.tight_layout()
     return fig
 
@@ -999,9 +1241,8 @@ def plot_population_ecdf_by_label(df: pd.DataFrame, column: str = "wiki_number",
 
     ax.set_xlabel("log₁₀(počet obyvatel)")
     ax.set_ylabel("Kumulativní podíl obcí")
-    ax.set_title(f"ECDF: populace dle labelu ({_SOURCE_LABELS.get(column, column)})")
     ax.legend(frameon=False, loc="lower right")
-    sns.despine(ax=ax)
+    sns.despine(ax=ax, left=True)
     fig.tight_layout()
     return fig
 
@@ -1081,16 +1322,15 @@ def plot_unknown_share_by_land(df: pd.DataFrame, column: str = "wiki_number",
     share = d.groupby("land")[column].apply(lambda s: (s == "unknown").mean()).sort_values()
 
     if ax is None:
-        fig, ax = plt.subplots(figsize=config.FIGSIZE_SQUARE)
+        fig, ax = plt.subplots(figsize=(6, _lollipop_height(len(share))))
     else:
         fig = ax.figure
 
-    ax.barh(share.index, share.values, color=COLORS["unknown"])
+    _hlollipop(ax, list(share.index), list(share.values), color=COLORS["unknown"])
     for i, v in enumerate(share.values):
         ax.text(v + 0.002, i, f"{v:.1%}", va="center", fontsize=9)
 
     ax.set_xlabel("Podíl obcí s labelem 'unknown'")
-    ax.set_title(f"Podíl neznámých obcí dle historické země ({_SOURCE_LABELS.get(column, column)})")
     sns.despine(ax=ax, left=True)
     fig.tight_layout()
     return fig
@@ -1155,8 +1395,7 @@ def plot_neighbor_share_by_label(df_with_share: pd.DataFrame, column: str = "wik
     ax.set_xlabel("")
     ax.set_ylabel("Podíl plurálu mezi k nejbližšími\nklasifikovanými sousedy")
     kind_label = "Violin" if kind == "violin" else "Box"
-    ax.set_title(f"{kind_label} plot: 'plural-sousedství' dle vlastního labelu obce")
-    sns.despine(ax=ax)
+    sns.despine(ax=ax, left=True)
     fig.tight_layout()
     return fig
 
@@ -1183,26 +1422,29 @@ def test_neighbor_share_by_label(df_with_share: pd.DataFrame, column: str = "wik
 # ---------------------------------------------------------------------------
 
 def plot_suffix_overview(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
-    """Bar chart: počet obcí v každé sufixální skupině."""
+    """Bar chart: počet obcí v každé sufixální skupině.
+
+    Šířka plátna (8") je záměrně stejná jako u `plot_by_suffix()` — obě
+    zobrazují stejné 3 skupiny hned pod sebou na stránce; různá šířka by je
+    vykreslila v jiném měřítku a jedna by vedle druhé působila "přiblíženě".
+    """
     set_style()
     counts = df["suffix_group"].value_counts()
 
     if ax is None:
-        fig, ax = plt.subplots(figsize=(8, 3))
+        fig, ax = plt.subplots(figsize=(8, _lollipop_height(len(SUFFIX_ORDER))))
     else:
         fig = ax.figure
 
     total = len(df)
-    palette = [config.CATEGORICAL_PALETTE[i] for i in range(len(SUFFIX_ORDER))]
-    sns.barplot(x=[counts.get(c, 0) for c in SUFFIX_ORDER],
-                y=[SUFFIX_TITLES[c] for c in SUFFIX_ORDER],
-                palette=palette, orient="h", ax=ax)
+    values = [counts.get(c, 0) for c in SUFFIX_ORDER]
+    colors = [config.CATEGORICAL_PALETTE[i] for i in range(len(SUFFIX_ORDER))]
+    _hlollipop(ax, [SUFFIX_TITLES[c] for c in SUFFIX_ORDER], values, colors=colors)
     for i, c in enumerate(SUFFIX_ORDER):
         n = counts.get(c, 0)
-        ax.text(n + 15, i, f"{n} ({n/total:.1%})", va="center", fontsize=9)
+        ax.text(n + counts.max() * 0.02, i, f"{n} ({n/total:.1%})", va="center", fontsize=9)
 
     ax.set_xlabel("Počet obcí")
-    ax.set_title("Sufixální skupiny obcí -ice")
     ax.set_xlim(0, counts.max() * 1.20)
     sns.despine(ax=ax, left=True)
     fig.tight_layout()
@@ -1210,34 +1452,22 @@ def plot_suffix_overview(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Fi
 
 
 def plot_by_suffix(df: pd.DataFrame, column: str = "wiki_number", ax: plt.Axes | None = None) -> plt.Figure:
-    """Stacked bar: sg vs. pl podíl v každé sufixální skupině (analogie plot_by_land)."""
-    set_style()
+    """Lollipop: podíl plurálu v každé sufixální skupině (analogie plot_by_land).
+
+    Pořadí i barvy skupin jsou stejné jako v `plot_suffix_overview()` (ne
+    seřazené podle podílu) — obě grafy vedle sebe na stránce mají stejné
+    kategorie na stejném místě, snáz se mezi nimi přepíná pohled.
+    """
     d = df[df[column].isin(["singular", "plural"])]
     pivot = d.groupby(["suffix_group", column]).size().unstack(fill_value=0)
     pivot = pivot.reindex(SUFFIX_ORDER)
     pivot["total"] = pivot.sum(axis=1)
     pivot["pct_pl"] = pivot.get("plural", 0) / pivot["total"]
 
-    if ax is None:
-        fig, ax = plt.subplots(figsize=config.FIGSIZE_SQUARE)
-    else:
-        fig = ax.figure
-
-    bottom = np.zeros(len(pivot))
-    for cat, label in [("plural", "Plurál"), ("singular", "Singulár")]:
-        vals = pivot.get(cat, pd.Series(0, index=pivot.index)).values
-        ax.bar([SUFFIX_TITLES[c] for c in pivot.index], vals, bottom=bottom, label=label, color=COLORS[cat])
-        bottom += vals
-
-    for i, (_, row) in enumerate(pivot.iterrows()):
-        ax.text(i, row["total"] + 5, f"{row['pct_pl']:.0%}", ha="center", fontsize=10, fontweight="bold", color="#222")
-
-    ax.set_ylabel("Počet obcí")
-    ax.set_title(f"Singulár vs. plurál dle sufixální skupiny ({_SOURCE_LABELS.get(column, column)})")
-    ax.legend(frameon=False)
-    sns.despine(ax=ax)
-    fig.tight_layout()
-    return fig
+    colors = [config.CATEGORICAL_PALETTE[i] for i in range(len(SUFFIX_ORDER))]
+    return _share_lollipop([SUFFIX_TITLES[c] for c in pivot.index], pivot["pct_pl"].values,
+                            pivot["total"].values, colors, ax=ax,
+                            figsize=(8, _lollipop_height(len(pivot))))
 
 
 def chi2_suffix_test(df: pd.DataFrame, column: str = "wiki_number") -> dict:
@@ -1307,6 +1537,11 @@ def plot_suffix_detail(df: pd.DataFrame, column: str = "wiki_number",
     Jemnější rozlišení než 3 hlavní skupiny — zajímavé pro morfologický
     detail, ale skupiny jsou malé a početné, takže formální test by měl
     málo síly a hodně příležitostí k falešné pozitivitě. Jen popisné.
+
+    Barva je záměrně INK (tmavá), ne PRIMARY steelblue jako u otestovaných
+    zjištění jinde v projektu — vizuální signál "tohle je exploratorní pohled,
+    ne otestovaný nález", ne porušení datové palety (ta vyhrazuje jen
+    terakotu striktně; steelblue je konvence pro hlavní/testovanou řadu).
     """
     set_style()
     d = df[df[column].isin(["singular", "plural"])].copy()
@@ -1315,18 +1550,17 @@ def plot_suffix_detail(df: pd.DataFrame, column: str = "wiki_number",
     g = g[g["n"] >= min_n].sort_values("pct_plural")
 
     if ax is None:
-        fig, ax = plt.subplots(figsize=config.FIGSIZE_WIDE)
+        fig, ax = plt.subplots(figsize=(config.FIGSIZE_WIDE[0], _lollipop_height(len(g))))
     else:
         fig = ax.figure
 
-    ax.barh(g.index, g["pct_plural"], color=config.PRIMARY_COLOR)
+    _hlollipop(ax, list(g.index), list(g["pct_plural"]), color=config.INK_COLOR)
     for i, (end5, row) in enumerate(g.iterrows()):
         ax.text(row["pct_plural"] + 0.01, i, f"{row['pct_plural']:.0%} (n={row['n']:.0f})",
                 va="center", fontsize=8)
 
     ax.set_xlabel("Podíl plurálu")
     ax.set_xlim(0, 1.15)
-    ax.set_title(f"Podíl plurálu dle koncovky (posledních 5 písmen, n ≥ {min_n})")
     sns.despine(ax=ax, left=True)
     fig.tight_layout()
     return fig
@@ -1391,16 +1625,15 @@ def plot_pseudo_r2_progression(models: dict[str, object], ax: plt.Axes | None = 
     r2 = [models[n].prsquared for n in names]
 
     if ax is None:
-        fig, ax = plt.subplots(figsize=config.FIGSIZE_WIDE)
+        fig, ax = plt.subplots(figsize=(config.FIGSIZE_WIDE[0], _lollipop_height(len(names))))
     else:
         fig = ax.figure
 
-    ax.barh(names, r2, color=config.PRIMARY_COLOR)
+    _hlollipop(ax, names, r2, color=config.PRIMARY_COLOR)
     for i, v in enumerate(r2):
         ax.text(v + 0.003, i, f"{v:.3f}", va="center", fontsize=9)
 
     ax.set_xlabel("Pseudo-R² (McFadden)")
-    ax.set_title("Kolik variance sg/pl vysvětlí který model")
     ax.invert_yaxis()
     sns.despine(ax=ax, left=True)
     fig.tight_layout()
@@ -1435,7 +1668,7 @@ def plot_model_coefficients(model, ax: plt.Axes | None = None) -> plt.Figure:
     order = params.reindex(params.abs().sort_values().index).index
 
     if ax is None:
-        fig, ax = plt.subplots(figsize=config.FIGSIZE_SQUARE)
+        fig, ax = plt.subplots(figsize=(6, _lollipop_height(len(order))))
     else:
         fig = ax.figure
 
@@ -1449,7 +1682,297 @@ def plot_model_coefficients(model, ax: plt.Axes | None = None) -> plt.Figure:
     ax.set_yticks(range(len(order)))
     ax.set_yticklabels([_pretty_coef_name(n) for n in order])
     ax.set_xlabel("Koeficient (log-odds) → plurál, s 95% CI")
-    ax.set_title("Finální model: sufix + populace + region")
     sns.despine(ax=ax, left=True)
     fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# 14. Doplňkové analýzy (notebook 13): rank-size (Zipf), hustota -ice obcí
+#     dle rozlohy kraje, citlivost prostorových testů na volbě k.
+# ---------------------------------------------------------------------------
+
+def plot_rank_size(df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
+    """Rank-size (Zipfův) graf: populace obce vs. pořadí podle velikosti, log-log.
+
+    Čistě popisný pohled, ne statistický test — proto INK_COLOR pro samotná
+    data, ne PRIMARY (viz STYLE_GUIDE.md §1). Referenční čárkovaná čára se
+    sklonem -1 (ideální Zipfovo rozdělení, P(rank) = P(1)/rank) je NEUTRAL —
+    je to srovnávací referenční tvar, ne nález ani riziko, takže ACCENT by tu
+    byl sémanticky špatně (ten je vyhrazený pro anomálie/prahy jinde v projektu).
+
+    Bod-na-obec graf s ~1 800 body → ulož jako PNG (`save_fig(fig, ..., fmt="png")`),
+    SVG by tu kreslilo každý bod jako samostatný element zbytečně navíc.
+    """
+    set_style()
+    d = df.dropna(subset=["population_total"])
+    d = d[d["population_total"] > 0].sort_values("population_total", ascending=False)
+    rank = np.arange(1, len(d) + 1)
+    pop = d["population_total"].values
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_DEFAULT)
+    else:
+        fig = ax.figure
+
+    ax.scatter(rank, pop, s=10, color=config.INK_COLOR, alpha=0.5, linewidths=0, label="Obce na -ice")
+    ref = pop[0] / rank
+    ax.plot(rank, ref, color=config.NEUTRAL_COLOR, lw=config.BASELINE_LW, ls=config.BASELINE_LS,
+            label="Ideální Zipf (sklon = -1)")
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("Pořadí podle velikosti (log)")
+    ax.set_ylabel("Počet obyvatel (log)")
+    ax.legend(frameon=False)
+    sns.despine(ax=ax)
+    fig.tight_layout()
+    return fig
+
+
+def test_zipf_law(df: pd.DataFrame, n_bootstrap: int = 200, seed: int = 42) -> dict:
+    """Férové ověření Zipfova zákona (Clauset, Shalizi & Newman 2009), balík `powerlaw`.
+
+    Naivní OLS regrese na log-log rank-size grafu (`plot_rank_size`) skoro
+    vždy vrátí vysoké R² — to podle kritiky Piantadosiho (2014) nic neříká
+    o tom, jestli je mocninné rozdělení skutečně nejlepší popis dat. Správný
+    postup: MLE odhad exponentu s KS-optimálním prahem `x_min` (mocninné
+    rozdělení typicky neplatí pro celá data, jen pro chvost nad prahem),
+    Monte Carlo bootstrap na "dá se to vůbec zamítnout" a Vuongův LRT proti
+    log-normálnímu rozdělení — nejčastější alternativě k mocninnému rozdělení
+    u velikostí měst (Eeckhout 2004).
+
+    Vrací dict:
+      `fit` — `powerlaw.Fit` objekt (pro `plot_zipf_ccdf`)
+      `alpha`, `xmin`, `n_tail`, `sigma` — MLE odhad exponentu a KS-optimální práh
+      `bootstrap_p` — GOF p-hodnota (CSN 2009 §4); p ≥ 0,1 → mocninné rozdělení
+        NAD `xmin` nelze na této hladině zamítnout
+      `lognormal_R`, `lognormal_p` — R > 0 → mocninné je lepší fit, R < 0 →
+        log-normální; p < 0,05 → rozdíl je statisticky významný
+    """
+    import powerlaw
+
+    freqs = df["population_total"].dropna()
+    freqs = freqs[freqs > 0].values
+
+    fit = powerlaw.Fit(freqs, discrete=True, verbose=False)
+    ks_emp = fit.power_law.D
+
+    np.random.seed(seed)
+    ks_syn = []
+    for _ in range(n_bootstrap):
+        synthetic = fit.power_law.generate_random(len(fit.data), estimate_discrete=True)
+        try:
+            syn_fit = powerlaw.Fit(synthetic, discrete=True, verbose=False, xmin=fit.xmin)
+            ks_syn.append(syn_fit.power_law.D)
+        except Exception:
+            continue
+    ks_syn = np.array(ks_syn)
+    bootstrap_p = float(np.mean(ks_syn >= ks_emp)) if len(ks_syn) else float("nan")
+
+    lognormal_R, lognormal_p = fit.distribution_compare("power_law", "lognormal", normalized_ratio=True)
+
+    return {
+        "fit": fit,
+        "alpha": fit.power_law.alpha, "xmin": fit.xmin,
+        "n_tail": int(fit.n), "sigma": fit.power_law.sigma,
+        "bootstrap_p": bootstrap_p, "n_bootstrap": len(ks_syn),
+        "lognormal_R": lognormal_R, "lognormal_p": lognormal_p,
+    }
+
+
+def plot_zipf_ccdf(fit, ax: plt.Axes | None = None) -> plt.Figure:
+    """CCDF diagnostický graf: empirická data vs. fitované mocninné a
+    log-normální rozdělení, log-log, jen nad KS-optimálním `fit.xmin`.
+
+    Standardní diagnostika pro "fair" Zipf testing (viz `test_zipf_law`) —
+    na rozdíl od rank-size grafu (`plot_rank_size`, celá data, naivní pohled)
+    tenhle graf ukazuje přesně tu část dat a přesně ten model, který byl
+    statisticky testovaný. Empirická data jsou INK (popisná), mocninný fit
+    PRIMARY (hlavní testovaný model), log-normální NEUTRAL (srovnávací
+    alternativa) — pokud se PRIMARY a NEUTRAL čára prakticky překrývají,
+    je to vizuální potvrzení toho, co říká `lognormal_R` blízké nule.
+    """
+    set_style()
+    if ax is None:
+        fig, ax = plt.subplots(figsize=config.FIGSIZE_DEFAULT)
+    else:
+        fig = ax.figure
+
+    fit.plot_ccdf(ax=ax, color=config.INK_COLOR, linewidth=0, marker="o",
+                  markersize=4, alpha=0.5, label="Obce (nad xmin)")
+    fit.power_law.plot_ccdf(ax=ax, color=config.PRIMARY_COLOR, linewidth=2.2,
+                             label=f"Mocninné (α = {fit.power_law.alpha:.2f})")
+    fit.lognormal.plot_ccdf(ax=ax, color=config.NEUTRAL_COLOR, linewidth=2.2,
+                             linestyle="--", label="Log-normální")
+
+    ax.set_xlabel(f"Počet obyvatel, log (≥ xmin = {fit.xmin:.0f})")
+    ax.set_ylabel("P(X ≥ x), log")
+    ax.legend(frameon=False)
+    sns.despine(ax=ax)
+    fig.tight_layout()
+    return fig
+
+
+def plot_density_by_kraj(df: pd.DataFrame, area_df: pd.DataFrame, ax: plt.Axes | None = None) -> plt.Figure:
+    """Lollipop: počet obcí na -ice na 1 000 km² plochy kraje.
+
+    Surový počet obcí na kraj (`plot_region_totals`) zavádí — Středočeský kraj
+    vede částečně jen proto, že je plošně největší. Normalizace rozlohou
+    (`data.load_kraj_areas()`, zdroj Wikidata/ČSÚ) odpovídá na jinou otázku:
+    kde je -ice obcí poměrově nejvíc vzhledem k velikosti kraje, ne kde jich
+    je nejvíc v absolutních číslech.
+    """
+    set_style()
+    counts = df["region_name"].value_counts().rename("n_obci")
+    d = area_df.set_index("kraj").join(counts, how="inner")
+    d["density"] = d["n_obci"] / d["area_km2"] * 1000
+    d = d.sort_values("density")
+    short = [_REGION_SHORT.get(r, r) for r in d.index]
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, _lollipop_height(len(d))))
+    else:
+        fig = ax.figure
+
+    _hlollipop(ax, short, list(d["density"]), color=config.PRIMARY_COLOR)
+    for i, v in enumerate(d["density"]):
+        ax.text(v + d["density"].max() * 0.02, i, f"{v:.1f}", va="center", fontsize=9)
+
+    ax.set_xlabel("Obcí na -ice na 1 000 km² plochy kraje")
+    ax.set_xlim(0, d["density"].max() * 1.15)
+    sns.despine(ax=ax, left=True)
+    fig.tight_layout()
+    return fig
+
+
+def k_sensitivity_test(df: pd.DataFrame, column: str = "wiki_number",
+                        k_values: Iterable[int] = range(4, 21, 2),
+                        permutations: int = 999, seed: int = 42) -> pd.DataFrame:
+    """Přepočítá globální Moran's I přes rozsah k (velikost k-NN sousedství).
+
+    Ověřuje, že hlavní prostorový nález (`moran_binary_test`, k=6) není
+    artefakt jedné konkrétní volby "kolik sousedů se počítá" — pokud I
+    zůstává v podobném řádu a se stejným znaménkem napříč k=4..20, závěr
+    "sousední obce sdílejí gramatické číslo víc, než by čekala náhoda" je
+    robustní na tenhle modelovací parametr, ne artefakt k=6.
+
+    Méně permutací než hlavní test (999 vs. 9999 v `moran_binary_test`) —
+    tady jde o směr/řád efektu napříč k, ne o přesnou p-hodnotu jednoho k;
+    9 hodnot k × 9999 permutací by bylo zbytečně pomalé pro tuhle otázku.
+    """
+    rows = []
+    for k in k_values:
+        mi = moran_binary_test(df, column=column, k=k, permutations=permutations, seed=seed)
+        rows.append({"k": k, "moran_I": mi["I"], "p_sim": mi["p_sim"]})
+    return pd.DataFrame(rows)
+
+
+def plot_k_sensitivity(result_df: pd.DataFrame, chosen_k: int = 6, ax: plt.Axes | None = None) -> plt.Figure:
+    """Scree-like graf: Moran's I napříč hodnotami k, se zvýrazněným zvoleným k.
+
+    Čára+tečky jsou INK/PRIMARY (popisný průběh), zvolené k je zvýrazněné
+    ACCENT — ne proto, že by bylo "riziko", ale je to jediné k, na kterém
+    stojí zbytek článku, takže si zaslouží stejnou vizuální váhu jako
+    upozornění jinde v projektu.
+    """
+    set_style()
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(6, 3.5))
+    else:
+        fig = ax.figure
+
+    ax.plot(result_df["k"], result_df["moran_I"], color=config.INK_COLOR, lw=1.6, zorder=2)
+    ax.scatter(result_df["k"], result_df["moran_I"], color=config.PRIMARY_COLOR, s=36,
+               zorder=3, linewidths=0)
+    chosen = result_df[result_df["k"] == chosen_k]
+    if not chosen.empty:
+        ax.scatter(chosen["k"], chosen["moran_I"], color=config.ACCENT_COLOR, s=90, zorder=4,
+                   linewidths=0, label=f"použité k = {chosen_k}")
+        ax.legend(frameon=False)
+
+    ax.set_xlabel("k (počet nejbližších sousedů)")
+    ax.set_ylabel("Moran's I")
+    ax.set_xticks(list(result_df["k"]))
+    ax.set_ylim(0, max(result_df["moran_I"].max() * 1.2, 0.05))
+    sns.despine(ax=ax)
+    fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# 15. Poster composer — JEDINÉ místo, kam se titulek smí propálit do obrázku.
+#
+# Grafy vložené do článku na webu titulek/podtitulek uvnitř obrázku NEMAJÍ
+# mít (mobilní responsivita, čtečky/SEO, editace bez re-run Pythonu — titulek
+# patří do <h2>/<figcaption> v HTML). compose_poster() je pro opačný případ:
+# samostatný obrázek, co cestuje sám o sobě (LinkedIn, X, slajd, PDF) a musí
+# nést titulek jako součást pixelů. Sdílená verze i s STYLE_GUIDE.md je v
+# research-template/modules/dataviz_style/ — tohle je zrcadlená kopie
+# přizpůsobená na COLORS/config tohoto projektu.
+# ---------------------------------------------------------------------------
+
+def compose_poster(
+    plot_fns,
+    title: str,
+    subtitle: str | None = None,
+    source: str | None = None,
+    layout: str = "row",
+    bg: str = "cream",
+    figsize: tuple[float, float] = (10, 6),
+) -> plt.Figure:
+    """Poskládá 1-2 grafy + editorial titulkový blok do jednoho samostatného obrázku.
+
+    `plot_fns`: jeden nebo dva callables `f(ax) -> None`, každý nakreslí
+    kompletní graf na dané `ax` — sedí přímo na konvenci téhle knihovny (každá
+    `plot_*` funkce už bere `ax=`). Pro funkci, co potřebuje víc argumentů,
+    použij `lambda ax: plot_x(df, ax=ax)`.
+
+    Typografie: serif titulek (`config.FONT_SERIF`), sans vše ostatní, mono
+    zdroj dole — viz STYLE_GUIDE.md v research-template, sekce "Poster mode".
+    Nepoužívej tohle na grafy, co jdou do HTML článku.
+    """
+    previous_bg = _current_bg
+    set_style(bg=bg)
+    n = len(plot_fns)
+    if n not in (1, 2):
+        raise ValueError("compose_poster podporuje jen 1 nebo 2 grafy")
+
+    fig = plt.figure(figsize=figsize)
+    bg_color = config.BG_WHITE if bg == "white" else config.BG_CREAM
+    fig.patch.set_facecolor(bg_color)
+
+    bottom = 0.16
+    top_margin = 0.72 if subtitle else 0.78
+    if n == 1:
+        axes = [fig.add_axes([0.08, bottom, 0.88, top_margin - bottom])]
+    elif layout == "row":
+        gap = 0.12  # dost místa na datové popisky u pravého okraje levého grafu
+        w = (0.92 - gap) / 2
+        axes = [
+            fig.add_axes([0.06, bottom, w, top_margin - bottom]),
+            fig.add_axes([0.06 + w + gap, bottom, w, top_margin - bottom]),
+        ]
+    else:
+        gap = 0.10
+        h = (top_margin - bottom - gap) / 2
+        axes = [
+            fig.add_axes([0.08, bottom + h + gap, 0.86, h]),
+            fig.add_axes([0.08, bottom, 0.86, h]),
+        ]
+
+    for fn, ax in zip(plot_fns, axes):
+        ax.set_facecolor(bg_color)
+        fn(ax)
+
+    fig.text(0.06, 0.95, title, fontfamily=config.FONT_SERIF, fontsize=20,
+              fontweight="bold", color=config.INK_COLOR)
+    if subtitle:
+        fig.text(0.06, 0.87, subtitle, fontfamily=config.FONT_SANS, fontsize=12,
+                  color=config.MUTED_COLOR)
+    if source:
+        fig.text(0.06, 0.02, source, fontfamily=config.FONT_MONO, fontsize=8,
+                  color=config.MUTED_COLOR)
+
+    set_style(bg=previous_bg)  # neprosakovat pozadí postera do dalších buněk
     return fig

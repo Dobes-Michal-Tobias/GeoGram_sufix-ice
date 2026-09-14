@@ -56,3 +56,45 @@ def save_filtered_ice(df: pd.DataFrame, destination: Path, name_column: str = "n
     filtered.to_csv(destination, index=False, **kwargs)
     return filtered
 
+
+# ---------------------------------------------------------------------------
+# Referenční data mimo -ice obce — celostátní populace, rozlohy krajů, hranice
+# ---------------------------------------------------------------------------
+
+# ČSÚ, "Počet obyvatel v regionech soudržnosti, krajích a okresech ČR" k 1. 1. 2025
+# (data/raw/pocty_obyvatel/1300722501.xlsx, řádek "CZ0 Česko").
+CZ_POPULATION_TOTAL_2025 = 10_909_500
+
+
+def load_kraj_areas(path: Path | None = None) -> pd.DataFrame:
+    """Načte rozlohy krajů v km² (Wikidata, P2046 — cituje ČSÚ ročenku ČR).
+
+    Vrací DataFrame se sloupci `kraj` (shoduje se s `region_name` v ostatních
+    datasetech) a `area_km2`. Praha je v datech zahrnutá pro úplnost, ale
+    žádná obec na -ice v ní neleží (Praha je jedno město, ne soubor obcí).
+
+    `path=None` (výchozí) čte z `config.RAW_DIR` — absolutní cesta, funguje
+    stejně z notebooku (cwd = notebooks/) i odjinud.
+    """
+    from . import config
+
+    path = path or config.RAW_DIR / "kraj_area_km2.csv"
+    return pd.read_csv(path)
+
+
+def load_cz_boundary(path: Path | None = None):
+    """Načte zjednodušenou hranici ČR (GeoJSON, WGS84 / EPSG:4326).
+
+    Zdroj: johan/world.geo.json (veřejný, zjednodušený polygon státní
+    hranice — dostatečně přesný pro orientační obrys na mapě, ne pro
+    přesné geodetické účely). Vrací `geopandas.GeoDataFrame`.
+
+    `path=None` (výchozí) čte z `config.RAW_DIR` — viz `load_kraj_areas()`.
+    """
+    from . import config
+    import geopandas as gpd
+
+    path = path or config.RAW_DIR / "boundary" / "cz_boundary.geojson"
+
+    return gpd.read_file(path)
+
