@@ -1,5 +1,6 @@
 """Data loading and processing utilities for GeoGram."""
 
+import re
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -44,9 +45,79 @@ def load_all_municipalities(
     )
 
 
+# Prepositions introducing a locational complement ("Lipnice nad Sázavou").
+# The complement is in an oblique case, so only the part before it decides
+# whether the name is an -ice name.
+_COMPLEMENT_PREPOSITIONS = {"nad", "pod", "u", "v", "ve", "na", "při", "za", "před", "mezi", "k", "ke"}
+_ROMAN_NUMERAL = re.compile(r"^[IVX]+$")
+
+NAME_SIMPLE = "simple"            # Pardubice, Velké Popovice
+NAME_COMPLEMENT = "complement"    # Lipnice nad Sázavou, Babice u Rosic
+NAME_COMPOUND = "compound"        # Bílovice-Lutotín (merged municipalities)
+NAME_NUMBERED = "numbered"        # Opatovice I, Petrovice II
+
+
+def _split_name(name: str) -> tuple[str, str]:
+    """Split a name into (core, name_type) — core is the part that bears number."""
+    tokens = name.split()
+    name_type = NAME_SIMPLE
+    if len(tokens) > 1 and _ROMAN_NUMERAL.match(tokens[-1]):
+        tokens = tokens[:-1]
+        name_type = NAME_NUMBERED
+    for i, tok in enumerate(tokens[1:], start=1):
+        if tok.lower() in _COMPLEMENT_PREPOSITIONS:
+            tokens = tokens[:i]
+            name_type = NAME_COMPLEMENT
+            break
+    core = " ".join(tokens)
+    if "-" in core:
+        parts = [p.strip() for p in core.split("-")]
+        ice_parts = [p for p in parts if p.endswith("ice")]
+        if ice_parts:
+            return ice_parts[0], NAME_COMPOUND
+    return core, name_type
+
+
+def ice_core(name: str) -> Optional[str]:
+    """Return the -ice part of a municipality name, or None if it is not an -ice name.
+
+    >>> ice_core("Lipnice nad Sázavou")
+    'Lipnice'
+    >>> ice_core("Velké Popovice")
+    'Velké Popovice'
+    >>> ice_core("Bílovice-Lutotín")
+    'Bílovice'
+    >>> ice_core("Ústí nad Orlicí") is None
+    True
+    """
+    if not isinstance(name, str):
+        return None
+    core, _ = _split_name(name)
+    return core if core.endswith("ice") else None
+
+
+def ice_head(name: str) -> Optional[str]:
+    """Return the single -ice word ("Velké Popovice" → "Popovice"), or None."""
+    core = ice_core(name)
+    return core.split()[-1] if core else None
+
+
+def ice_name_type(name: str) -> Optional[str]:
+    """Return simple / complement / compound / numbered for -ice names, else None."""
+    if ice_core(name) is None:
+        return None
+    return _split_name(name)[1]
+
+
 def filter_suffix_ice(df: pd.DataFrame, name_column: str = "name") -> pd.DataFrame:
-    """Return rows where the municipality name ends with '-ice'."""
-    return df[df[name_column].str.endswith("ice", na=False)].copy()
+    """Return -ice municipalities, incl. multi-word names ("Lipnice nad Sázavou").
+
+    Adds ``ice_head`` (the -ice word) and ``name_type`` columns.
+    """
+    out = df[df[name_column].map(ice_core).notna()].copy()
+    out["ice_head"] = out[name_column].map(ice_head)
+    out["name_type"] = out[name_column].map(ice_name_type)
+    return out
 
 
 def save_filtered_ice(df: pd.DataFrame, destination: Path, name_column: str = "name", **kwargs) -> pd.DataFrame:
