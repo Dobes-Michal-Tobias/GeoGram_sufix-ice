@@ -5,6 +5,8 @@ import time
 
 import requests
 
+from .data import ice_core, ice_head
+
 
 SINGULAR = "singular"
 PLURAL = "plural"
@@ -155,7 +157,8 @@ def name_implies_plural(name: str) -> bool:
     an -ice name unambiguously signals plural (e.g. "Velké Popovice").
     Soft adjectives (horní, dolní, …) are invariant across sg/pl and excluded.
     """
-    return bool(_ADJ_PLURAL_ICE.match(name)) and name.rstrip().endswith("ice")
+    core = ice_core(name)  # "Velké Popovice u X" → "Velké Popovice"
+    return core is not None and bool(_ADJ_PLURAL_ICE.match(core))
 
 
 def extract_grammar_number(intro: str, name: str) -> str:
@@ -228,10 +231,11 @@ def extract_grammar_number_locative(text: str, name: str) -> str:
     Returns UNKNOWN if neither form is attested, or if both are (ambiguous —
     e.g. a village with a differently-numbered part, like "Ptice"/"Horní Ptici").
     """
-    if not text or not name.endswith("ice"):
+    head = ice_head(name)  # "Lipnice nad Sázavou" → "Lipnice"
+    if not text or head is None:
         return UNKNOWN
 
-    stem = re.escape(name[:-3])
+    stem = re.escape(head[:-3])
     has_plural = bool(re.search(rf"{stem}ic[ií]ch\b", text, re.IGNORECASE))
     has_singular = bool(re.search(rf"\b{stem}ici\b", text, re.IGNORECASE))
 

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from .data import ice_head
+
 SUFFIX_ORDER = ["ovice", "nice", "bare_ice"]
 SUFFIX_TITLES = {
     "ovice": "-ovice",
@@ -27,6 +29,7 @@ def classify_suffix(name: str) -> str:
     (viz notebook 11 sekce 2 pro rozpad četností). Zbytek je "holé -ice" —
     souhláska přímo před -ice, heterogenní zbytková kategorie.
     """
+    name = ice_head(name) or name  # "Lipnice nad Sázavou" → "Lipnice"
     if name.endswith("ovice"):
         return "ovice"
     if name.endswith("nice"):
