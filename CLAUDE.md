@@ -2,7 +2,7 @@
 
 ## Co je projekt
 
-Výzkumný projekt: 1 806 českých obcí s koncovkou `-ice`, cíl je zjistit zda jsou
+Výzkumný projekt: 1 906 českých obcí s koncovkou `-ice`, cíl je zjistit zda jsou
 gramaticky **singulár nebo plurál** (pomnožná jména) a jak jsou prostorově rozloženy.
 
 Výzkumné otázky: podíl sg/pl, geografická distribuce (Čechy vs. Morava),
@@ -16,6 +16,10 @@ src/geogram/          ← Python balíček (logika zde, ne v noteboocích)
   ingest.py           ← integrace RÚIAN + ČSÚ
   ujc.py              ← IJP ÚJČ parser (sg/pl z morfol. tabulky)
   wikipedia.py        ← Wikipedia disambiguace + extrakce sg/pl z intro textu
+  ujc_scrape.py       ← robustní IJP scraper s cache surového HTML
+  morphology.py       ← sufixální skupiny (-ovice / -nice / holé -ice)
+  viz.py              ← grafy + statistické testy (chi², join-count, LISA, logit)
+  web_export.py       ← JSON tabulka + statistiky pro článek na webu
 
 data/raw/             ← RÚIAN CSVs (UI_OBEC, UI_OKRES, UI_VUSC) + ČSÚ Excel
 data/processed/       ← výstupy (gitignored — generuj spuštěním notebooků)
@@ -28,27 +32,28 @@ notebooks/
   05  batch IJP ÚJČ klasifikace → ice_grammar_ujc.csv
   06  batch Wikipedia klasifikace → ice_grammar_wiki.csv
   07  re-klasifikace unknown (intro + lokativní fallback), statistiky, mapa
+  08–13  prostorová segregace, unknown vs. populace/geografie, sufixy,
+         výjimky + syntéza, doplňkové analýzy
 ```
 
-## Aktuální stav (2026-06-15)
+## Aktuální stav (2026-10-31)
 
-### Hotovo a funkční
-- `data/processed/municipalities_ice_integrated.csv` — 1 806 obcí s demografií
-- `src/geogram/ujc.py` — parser funguje, má retry logiku pro server overload
-- `src/geogram/wikipedia.py` — disambiguace (3 strategie) + regex extrakce sg/pl
-- Notebooky 01–06 jsou opraveny a připraveny ke spuštění
+Zdroj gramatického čísla je **Wikipedia** (IJP ÚJČ odloženo — server blokuje
+po ~13 dotazech, viz gotchas; uživatel se rozhodl zůstat u Wikipedie).
+Odborný článek se nechystá, výstupem je článek na webu (repo `personalWeb`,
+`projekty/obce-na-ice.html`).
 
-### Co je potřeba ještě spustit
-
-**Notebook 05 (IJP ÚJČ):**
-- `data/processed/ice_grammar_ujc.csv` existuje ALE data jsou vadná
-- Při posledním běhu server ÚJČ throttloval IP → 684/700 výsledků je `not_found`
-- **Postup:** ověř že server odpovídá (notebook 03), pak spusť nb05 s `SLEEP_BETWEEN_REQUESTS = 5.0`
-- Nb05 automaticky přeskočí správné výsledky (sg/pl/both) a re-procesuje jen not_found/error
-
-**Notebook 06 (Wikipedia):**
-- Nebyl ještě spuštěn vůbec
-- Odhadovaný čas: ~15 minut (Wikipedia API je benevolentní, 0.5s/dotaz)
+- **1 906 obcí** (`filter_suffix_ice` přes `ice_core()` — vč. víceslovných
+  názvů „Lipnice nad Sázavou“, spojených obcí a římských číslic; sloupce
+  `ice_head`, `name_type`). Do 2026-10 bylo chybně 1 806.
+- `ice_grammar_wiki_v2.csv`: 1 507 plurál, 251 singulár, 148 unknown
+- Pipeline: nb04 → nb06 (navazuje, dotazuje jen nové/unknown) → nb07 → nb08–13
+- **Aktualizace webu:** grafy z `assets/img/geogram/` (10 souborů, viz `<img>`
+  v článku) + `data/processed/mapa_ice.html` → `personalWeb/assets/geogram/mapa-ice.html`
+  + `python -m geogram.web_export` (tabulka + statistiky + blok `text` s čísly
+  citovanými v próze).
+- `ujc_scrape.py` — robustní IJP scraper s HTML cache (`data/raw/ujc_html/`),
+  zatím staženo jen 13 hesel.
 
 ## Kritické gotchas — přečti PŘED prací na IJP
 
