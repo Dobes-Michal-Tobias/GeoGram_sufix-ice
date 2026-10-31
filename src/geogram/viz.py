@@ -1010,8 +1010,38 @@ def moran_local_test(df: pd.DataFrame, column: str = "wiki_number",
 
     ml = Moran_Local(y, w, permutations=permutations, seed=seed)
     gdf["lisa_q"] = ml.q
-    gdf["lisa_p"] = ml.p_sim
+    gdf["lisa_p_esda"] = ml.p_sim
+    gdf["lisa_p"] = _lisa_p_exact_binary(y, w)
     return gdf, ml
+
+
+def _lisa_p_exact_binary(y: np.ndarray, w) -> np.ndarray:
+    """Přesná podmíněná p-hodnota LISA pro binární y, remízy započítané.
+
+    `esda.Moran_Local.p_sim` porovnává permutace ostrou nerovností: u binárních
+    dat s pevným k je spousta permutací přesně stejných jako pozorování
+    a podle zaokrouhlení float čísel padnou buď do ocasu, nebo ne. Výsledek:
+    singulár s 6/6 plurálovými sousedy dostal p ≈ 0,0001, ačkoli při ~86 %
+    plurálu má taková konfigurace pravděpodobnost ~0,40 (a plurál se 4/6
+    sousedy p ≈ 0,04 místo ~0,2 — podle toho, jak padly floaty).
+
+    Podmíněná randomizace (sousedé tažení bez vracení z ostatních n−1 obcí)
+    dává pro počet plurálových sousedů hypergeometrické rozdělení — p je
+    menší z obou ocasů, oba včetně pozorované hodnoty (konzervativní).
+    """
+    from scipy.stats import hypergeom
+
+    y = np.asarray(y, dtype=int)
+    n = len(y)
+    k = np.asarray(w.cardinalities_array if hasattr(w, "cardinalities_array")
+                   else [w.cardinalities[i] for i in w.id_order])
+    w_bin = w.sparse.copy()
+    w_bin.data[:] = 1.0
+    n_pl = np.asarray(w_bin.dot(y)).round().astype(int)
+    pool_pl = y.sum() - y          # plurálové obce mimo samotnou obec
+    lo = hypergeom.cdf(n_pl, n - 1, pool_pl, k)
+    hi = hypergeom.sf(n_pl - 1, n - 1, pool_pl, k)
+    return np.minimum(lo, hi)
 
 
 def plot_lisa_map(gdf: pd.DataFrame, alpha: float = 0.05, boundary=None,
