@@ -47,4 +47,5 @@ def add_suffix_column(df: pd.DataFrame, name_col: str = "name") -> pd.DataFrame:
 def suffix_ending(name: str, n: int = 5) -> str:
     """Posledních n písmen jména — pro jemnější popisnou analýzu (ne formální test,
     skupiny jsou příliš malé a početné na spolehlivý chi²)."""
+    name = ice_head(name) or name  # "Lipnice nad Sázavou" → "Lipnice"
     return name[-n:] if len(name) >= n else name
